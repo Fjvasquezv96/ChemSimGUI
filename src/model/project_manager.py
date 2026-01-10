@@ -1,81 +1,65 @@
 import os
 import shutil
 import json
+import copy
 from datetime import datetime
 
 class ProjectManager:
     def __init__(self):
         self.current_project_path = None
-        self.active_system_name = None # Nombre del sistema actual (ej: "10_CBD")
+        self.active_system_name = None 
         self.project_data = {}
 
     def create_project(self, name, root_path):
-        """Crea el contenedor principal del proyecto"""
         self.current_project_path = os.path.join(root_path, name)
         try:
-            # Carpetas globales
             os.makedirs(os.path.join(self.current_project_path, "storage"), exist_ok=True)
             
             self.project_data = {
                 "name": name,
                 "created_at": str(datetime.now()),
-                "systems": {}, # Diccionario de sistemas { "Nombre": {estados...} }
+                "systems": {}, 
                 "active_system": None
             }
             
-            # Crear un sistema por defecto
             self.create_system("Default_System")
-            
             self.save_db()
             return True, f"Proyecto creado en {self.current_project_path}"
         except Exception as e:
             return False, str(e)
 
     def load_project_from_path(self, full_path):
-        """Carga proyecto y establece el sistema activo"""
         db_path = os.path.join(full_path, "project_db.json")
-        if not os.path.exists(db_path):
-            return False, "No es un proyecto válido."
+        if not os.path.exists(db_path): return False, "No es un proyecto válido."
         
         try:
             self.current_project_path = full_path
-            with open(db_path, 'r') as f:
-                self.project_data = json.load(f)
+            with open(db_path, 'r') as f: self.project_data = json.load(f)
             
-            # Recuperar último sistema activo o el primero
             active = self.project_data.get("active_system")
             systems = list(self.project_data.get("systems", {}).keys())
             
-            if active and active in systems:
-                self.active_system_name = active
-            elif systems:
-                self.active_system_name = systems[0]
-            else:
-                self.create_system("Default_System")
+            if active and active in systems: self.active_system_name = active
+            elif systems: self.active_system_name = systems[0]
+            else: self.create_system("Default_System")
                 
             return True, "Proyecto cargado."
-        except Exception as e:
-            return False, f"Error JSON: {e}"
+        except Exception as e: return False, f"Error JSON: {e}"
 
     def save_db(self):
         if self.current_project_path:
             self.project_data["active_system"] = self.active_system_name
-            db_path = os.path.join(self.current_project_path, "project_db.json")
-            with open(db_path, 'w') as f:
+            with open(os.path.join(self.current_project_path, "project_db.json"), 'w') as f:
                 json.dump(self.project_data, f, indent=4)
 
     # --- GESTIÓN DE SISTEMAS ---
 
     def create_system(self, sys_name):
-        """Crea un nuevo sistema vacío"""
-        if sys_name in self.project_data.get("systems", {}):
-            return False, "Ya existe un sistema con ese nombre."
+        if sys_name in self.project_data.get("systems", {}): return False, "Ya existe."
         
-        # Crear carpeta física
         sys_path = os.path.join(self.current_project_path, "storage", sys_name)
         os.makedirs(sys_path, exist_ok=True)
         
-        # Inicializar datos en JSON
         if "systems" not in self.project_data: self.project_data["systems"] = {}
         
         self.project_data["systems"][sys_name] = {
@@ -84,69 +68,94 @@ class ProjectManager:
             "topology_state": {},
             "simulation_state": {}
         }
-        
         self.active_system_name = sys_name
         self.save_db()
         return True, sys_path
 
     def clone_system(self, new_name, source_name):
         """
-        Clona la CONFIGURACIÓN de un sistema a otro nuevo.
-        NO clona los archivos generados (traj, tpr, gro) para evitar corrupción.
-        SÍ clona los archivos de entrada esenciales (itps, mdps).
+        Clona configuración (MDP, ITP) pero NO resultados (GRO, TPR, XTC).
+        Resetea el estado de las simulaciones a 'Pendiente'.
         """
-        if new_name in self.project_data["systems"]:
-            return False, "El nombre destino ya existe."
-        
-        if source_name not in self.project_data["systems"]:
-            return False, "El sistema origen no existe."
+        if new_name in self.project_data["systems"]: return False, "Nombre existe."
+        if source_name not in self.project_data["systems"]: return False, "Origen no existe."
 
-        # 1. Crear entrada en JSON copiando los estados
+        # 1. Clonar datos del JSON
         source_data = self.project_data["systems"][source_name]
-        # Usamos deepcopy conceptual (json dump/load es una forma fácil de clonar dicts)
-        import copy
         new_data = copy.deepcopy(source_data)
         new_data["created"] = str(datetime.now())
+        
+        # 2. LIMPIEZA DE ESTADO (Issue #3)
+        # Reseteamos recursivamente el árbol de simulación a "Pendiente"
+        def reset_status_recursive(nodes):
+            for node in nodes:
+                node['status'] = "Pendiente"
+                if 'children' in node:
+                    reset_status_recursive(node['children'])
+        
+        sim_state = new_data.get("simulation_state", {})
+        if "tree_data" in sim_state:
+            reset_status_recursive(sim_state["tree_data"])
+            
         self.project_data["systems"][new_name] = new_data
         
-        # 2. Crear carpetas físicas
+        # 3. Copiar Archivos Físicos (Filtrado - Issue #4)
         src_path = os.path.join(self.current_project_path, "storage", source_name)
         dst_path = os.path.join(self.current_project_path, "storage", new_name)
         os.makedirs(dst_path, exist_ok=True)
         
-        # 3. Copiar archivos ESENCIALES (MDPs, ITPs, PDBs base)
-        # NO copiamos .tpr, .xtc, .log, .edr
-        valid_extensions = ['.mdp', '.itp', '.pdb', '.top'] 
+        # Extensiones permitidas (Configuración)
+        # NO copiamos .gro (porque viene de Setup nuevo), ni .tpr, .xtc, .log
+        # SÍ copiamos .mdp (parámetros), .itp (topologías), .top (estructura general), .pdb (referencias)
+        allowed_ext = ['.mdp', '.itp', '.top', '.pdb'] 
         
         try:
             for item in os.listdir(src_path):
-                if any(item.endswith(ext) for ext in valid_extensions):
+                if any(item.endswith(ext) for ext in allowed_ext):
+                    # Excepción especial: system_init.pdb a veces se quiere conservar como referencia,
+                    # pero system.gro NO, porque ese es el resultado de editconf.
                     s = os.path.join(src_path, item)
                     d = os.path.join(dst_path, item)
                     if os.path.isfile(s):
                         shutil.copy2(s, d)
         except Exception as e:
-            return False, f"Error copiando archivos: {e}"
+            return False, f"Error copiando: {e}"
 
         self.active_system_name = new_name
         self.save_db()
-        return True, "Sistema clonado exitosamente."
+        return True, "Sistema clonado (Configuración copiada, Estados reseteados)."
+
+    def delete_system(self, sys_name):
+        if sys_name not in self.project_data.get("systems", {}): return False, "No existe."
+        sys_path = os.path.join(self.current_project_path, "storage", sys_name)
+        try:
+            if os.path.exists(sys_path): shutil.rmtree(sys_path)
+        except Exception as e: return False, str(e)
+            
+        del self.project_data["systems"][sys_name]
+        
+        if self.active_system_name == sys_name:
+            keys = list(self.project_data["systems"].keys())
+            if keys: self.active_system_name = keys[0]
+            else: 
+                self.active_system_name = None
+                self.create_system("Default_System")
+        
+        self.save_db()
+        return True, "Eliminado."
 
     def get_active_system_path(self):
-        """Retorna la ruta física del sistema actual"""
         if not self.current_project_path or not self.active_system_name: return None
         return os.path.join(self.current_project_path, "storage", self.active_system_name)
 
-    # --- ESTADO DE PESTAÑAS (Ahora relativo al sistema) ---
-
-    def update_tab_state(self, tab_name, data):
+    def update_tab_state(self, tab, data):
         if self.active_system_name:
-            self.project_data["systems"][self.active_system_name][f"{tab_name}_state"] = data
+            self.project_data["systems"][self.active_system_name][f"{tab}_state"] = data
             self.save_db()
 
-    def get_tab_state(self, tab_name):
+    def get_tab_state(self, tab):
         if self.active_system_name:
-            return self.project_data["systems"][self.active_system_name].get(f"{tab_name}_state", {})
+            return self.project_data["systems"][self.active_system_name].get(f"{tab}_state", {})
         return {}
     
     def get_system_list(self):

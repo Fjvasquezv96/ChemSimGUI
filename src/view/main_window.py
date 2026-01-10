@@ -2,11 +2,10 @@ import sys
 import os
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QLabel, 
                              QPushButton, QLineEdit, QFileDialog, QMessageBox, 
-                             QTabWidget, QFrame)
+                             QTabWidget, QFrame, QHBoxLayout, QComboBox, QInputDialog)
 from PyQt6.QtCore import Qt
 from src.model.project_manager import ProjectManager
 
-# --- IMPORTACIÓN DE PESTAÑAS (MÓDULOS) ---
 from src.view.setup_tab import SetupTab 
 from src.view.topology_tab import TopologyTab
 from src.view.simulation_tab import SimulationTab 
@@ -16,216 +15,217 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ChemSimGUI - Gestor de Tesis")
-        self.setGeometry(100, 100, 950, 700)
+        self.setGeometry(100, 100, 1100, 800)
         
-        # Lógica del Proyecto
         self.project_mgr = ProjectManager()
 
-        # Widget Central (Pestañas)
+        main_widget = QWidget()
+        self.main_layout = QVBoxLayout()
+        main_widget.setLayout(self.main_layout)
+        self.setCentralWidget(main_widget)
+
+        self.init_system_toolbar()
+        
         self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
         
-        # --- 1. PESTAÑA INICIO ---
-        self.tab_home = QWidget()
-        self.setup_project_ui() 
-        self.tabs.addTab(self.tab_home, "1. Inicio")
+        self.tab_home = QWidget(); self.setup_project_ui(); self.tabs.addTab(self.tab_home, "1. Proyecto")
+        self.setup_tab = SetupTab(); self.tabs.addTab(self.setup_tab, "2. Setup")
+        self.topo_tab = TopologyTab(); self.tabs.addTab(self.topo_tab, "3. Topología")
+        self.sim_tab = SimulationTab(); self.tabs.addTab(self.sim_tab, "4. Simulación")
+        self.analysis_tab = AnalysisTab(); self.tabs.addTab(self.analysis_tab, "5. Análisis")
         
-        # --- 2. PESTAÑA CONFIGURACIÓN (Packmol) ---
-        self.setup_tab = SetupTab() 
-        self.tabs.addTab(self.setup_tab, "2. Setup (Packmol)")
-        
-        # --- 3. PESTAÑA TOPOLOGÍA (GROMACS) ---
-        self.topo_tab = TopologyTab()
-        self.tabs.addTab(self.topo_tab, "3. Topología")
-        
-        # --- 4. PESTAÑA SIMULACIÓN (MDP + Run) ---
-        self.sim_tab = SimulationTab()
-        self.tabs.addTab(self.sim_tab, "4. Simulación (Run)")
-
-        # --- 5. PESTAÑA ANÁLISIS (Gráficos) ---
-        self.analysis_tab = AnalysisTab()
-        self.tabs.addTab(self.analysis_tab, "5. Análisis")
-
-        self.tabs.setTabEnabled(4, False) # Bloquear al inicio
-        
-        # Bloquear pestañas hasta que se cree un proyecto
-        self.tabs.setTabEnabled(1, False) 
-        self.tabs.setTabEnabled(2, False) 
-        self.tabs.setTabEnabled(3, False) 
-        
-        # Conectar evento de cambio de pestaña
+        self.enable_tabs(False)
         self.tabs.currentChanged.connect(self.on_tab_changed)
+        
+        self.main_layout.addWidget(self.tabs)
+
+    def init_system_toolbar(self):
+        self.system_bar = QFrame()
+        self.system_bar.setFrameShape(QFrame.Shape.StyledPanel)
+        self.system_bar.setStyleSheet("background-color: #f8f9fa; border-bottom: 1px solid #ddd;")
+        
+        h_layout = QHBoxLayout()
+        h_layout.setContentsMargins(10, 5, 10, 5)
+        
+        h_layout.addWidget(QLabel("<b>Sistema Activo:</b>"))
+        
+        self.combo_systems = QComboBox()
+        self.combo_systems.setMinimumWidth(200)
+        self.combo_systems.currentIndexChanged.connect(self.on_system_changed)
+        h_layout.addWidget(self.combo_systems)
+        
+        btn_new = QPushButton("➕ Nuevo")
+        btn_new.clicked.connect(self.new_system_dialog)
+        h_layout.addWidget(btn_new)
+        
+        btn_clone = QPushButton("content_copy Clonar")
+        btn_clone.clicked.connect(self.clone_system_dialog)
+        h_layout.addWidget(btn_clone)
+        
+        # BOTÓN ELIMINAR NUEVO
+        btn_del = QPushButton("🗑️ Eliminar")
+        btn_del.setStyleSheet("color: red; font-weight: bold;")
+        btn_del.clicked.connect(self.delete_system_dialog)
+        h_layout.addWidget(btn_del)
+        
+        h_layout.addStretch()
+        self.lbl_path_info = QLabel("Ruta: Ninguna")
+        self.lbl_path_info.setStyleSheet("color: gray; font-size: 10px;")
+        h_layout.addWidget(self.lbl_path_info)
+        
+        self.system_bar.setLayout(h_layout)
+        self.system_bar.setVisible(False) 
+        
+        self.main_layout.addWidget(self.system_bar)
+
+    # --- GESTIÓN DE PROYECTO ---
 
     def setup_project_ui(self):
-        """Diseño visual de la pestaña Inicio"""
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        l = QVBoxLayout(); l.setAlignment(Qt.AlignmentFlag.AlignTop)
+        l.addWidget(QLabel("<h2>Gestión de Proyecto</h2>"))
         
-        title = QLabel("Bienvenido al Gestor de Simulaciones")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; margin-bottom: 10px;")
-        layout.addWidget(title)
+        panel = QFrame(); panel.setFrameShape(QFrame.Shape.StyledPanel)
+        pl = QVBoxLayout()
+        pl.addWidget(QLabel("Nombre:")); self.input_name = QLineEdit("Tesis_01"); pl.addWidget(self.input_name)
         
-        panel = QFrame()
-        panel.setFrameShape(QFrame.Shape.StyledPanel)
-        panel.setStyleSheet("background-color: #f0f0f0; border-radius: 5px; padding: 10px;")
-        panel_layout = QVBoxLayout()
+        btn_create = QPushButton("Crear Nuevo"); btn_create.clicked.connect(self.create_handler); pl.addWidget(btn_create)
+        btn_load = QPushButton("Cargar Existente"); btn_load.clicked.connect(self.load_handler); pl.addWidget(btn_load)
         
-        panel_layout.addWidget(QLabel("Paso 1: Defina el nombre del nuevo proyecto"))
-        self.input_name = QLineEdit("Mi_Tesis_Simulacion_01")
-        self.input_name.setStyleSheet("padding: 5px; font-size: 14px;")
-        panel_layout.addWidget(self.input_name)
+        panel.setLayout(pl); l.addWidget(panel)
         
-        panel_layout.addSpacing(10) 
-        
-        panel_layout.addWidget(QLabel("Paso 2: Seleccione dónde guardar la carpeta"))
-        self.btn_create = QPushButton("📂 Seleccionar Ruta y Crear Proyecto")
-        self.btn_create.setMinimumHeight(40)
-        self.btn_create.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")
-        self.btn_create.clicked.connect(self.create_project_handler)
-        panel_layout.addWidget(self.btn_create)
-        
-        self.btn_load = QPushButton("📂 Cargar Proyecto Existente")
-        self.btn_load.setMinimumHeight(40)
-        self.btn_load.clicked.connect(self.load_project_handler)
-        panel_layout.addWidget(self.btn_load)
+        self.lbl_status = QLabel("Esperando..."); l.addWidget(self.lbl_status)
+        self.tab_home.setLayout(l)
 
-        panel.setLayout(panel_layout)
-        layout.addWidget(panel)
-        
-        layout.addSpacing(20)
-        self.lbl_status = QLabel("Estado: Esperando creación de proyecto...")
-        self.lbl_status.setStyleSheet("color: gray; font-style: italic;")
-        layout.addWidget(self.lbl_status)
-        
-        self.lbl_path_info = QLabel("")
-        layout.addWidget(self.lbl_path_info)
-        
-        self.tab_home.setLayout(layout)
-
-    def create_project_handler(self):
-        """Maneja la creación del proyecto y activa las pestañas"""
+    def create_handler(self):
         name = self.input_name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Error", "Escriba un nombre para el proyecto.")
-            return
-
-        root_path = QFileDialog.getExistingDirectory(self, "Seleccionar Carpeta Raíz")
-        
-        if root_path:
-            success, msg = self.project_mgr.create_project(name, root_path)
-            
+        if not name: return
+        path = QFileDialog.getExistingDirectory(self, "Dir")
+        if path:
+            success, msg = self.project_mgr.create_project(name, path)
             if success:
-                self.lbl_status.setText(f"✅ PROYECTO ACTIVO: {name}")
-                self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
-                self.save_all_states()
-
-                full_path = self.project_mgr.current_project_path
-                self.lbl_path_info.setText(f"Ruta: {full_path}")
-                
-                # --- HABILITAR PESTAÑAS ---
-                self.tabs.setTabEnabled(1, True)
-                self.tabs.setTabEnabled(2, True)
-                self.tabs.setTabEnabled(3, True)
-                
-                # --- PASAR DATOS DEL PROYECTO A LAS PESTAÑAS ---
-                
-                # 1. Setup Tab (Necesita ruta para guardar PDBs)
-                self.setup_tab.set_active_project(full_path)
-                
-                # 2. Topology Tab (Necesita ruta para guardar .top)
-                # Nota: TopologyTab obtiene datos al cambiar de pestaña (on_tab_changed)
-                # pero podemos inicializar la ruta base aquí también si fuera necesario.
-                
-                # 3. Simulation Tab (Necesita ruta para guardar .mdp)
-                self.sim_tab.update_project_data(self.project_mgr) 
-
-                # 4. Análisis Tab
-                self.tabs.setTabEnabled(4, True)
-                self.analysis_tab.update_project_data(self.project_mgr)
-                
-                QMessageBox.information(self, "Proyecto Creado", f"Carpeta creada exitosamente:\n{full_path}")
+                self.project_loaded()
+                QMessageBox.information(self, "OK", "Proyecto Creado")
             else:
-                self.lbl_status.setText(f"❌ Error: {msg}")
-                self.lbl_status.setStyleSheet("color: red;")
+                QMessageBox.critical(self, "Error", msg)
+
+    def load_handler(self):
+        path = QFileDialog.getExistingDirectory(self, "Dir")
+        if path:
+            success, msg = self.project_mgr.load_project_from_path(path)
+            if success:
+                self.project_loaded()
+                QMessageBox.information(self, "OK", "Proyecto Cargado")
+            else:
+                QMessageBox.critical(self, "Error", msg)
+
+    def project_loaded(self):
+        self.enable_tabs(True)
+        self.system_bar.setVisible(True)
+        self.lbl_status.setText(f"Activo: {self.project_mgr.project_data['name']}")
+        self.refresh_systems_combo()
+        self.load_active_system_to_tabs()
+
+    def refresh_systems_combo(self):
+        self.combo_systems.blockSignals(True)
+        self.combo_systems.clear()
+        systems = self.project_mgr.get_system_list()
+        self.combo_systems.addItems(systems)
         
+        current = self.project_mgr.active_system_name
+        idx = self.combo_systems.findText(current)
+        if idx >= 0: self.combo_systems.setCurrentIndex(idx)
+        self.combo_systems.blockSignals(False)
+
+    # --- GESTIÓN DE SISTEMAS ---
+
+    def on_system_changed(self):
+        new_sys = self.combo_systems.currentText()
+        if new_sys:
+            self.project_mgr.active_system_name = new_sys
+            self.project_mgr.save_db()
+            self.load_active_system_to_tabs()
+
+    def new_system_dialog(self):
+        name, ok = QInputDialog.getText(self, "Nuevo Sistema", "Nombre (ej: 50_CBD):")
+        if ok and name:
+            success, msg = self.project_mgr.create_system(name)
+            if success:
+                self.refresh_systems_combo()
+                self.load_active_system_to_tabs()
+            else:
+                QMessageBox.warning(self, "Error", msg)
+
+    def clone_system_dialog(self):
+        name, ok = QInputDialog.getText(self, "Clonar Sistema", f"Clonar '{self.project_mgr.active_system_name}' como:")
+        if ok and name:
+            success, msg = self.project_mgr.clone_system(name, self.project_mgr.active_system_name)
+            if success:
+                self.refresh_systems_combo()
+                self.load_active_system_to_tabs()
+                QMessageBox.information(self, "Clonado", "Sistema clonado.")
+            else:
+                QMessageBox.warning(self, "Error", msg)
+
+    def delete_system_dialog(self):
+        curr = self.project_mgr.active_system_name
+        if not curr: return
+        
+        reply = QMessageBox.question(
+            self, "Eliminar", 
+            f"¿Está seguro de eliminar el sistema '{curr}'?\nEsta acción borrará todos sus archivos y NO se puede deshacer.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            success, msg = self.project_mgr.delete_system(curr)
+            if success:
+                QMessageBox.information(self, "Eliminado", msg)
+                self.refresh_systems_combo()
+                self.load_active_system_to_tabs()
+            else:
+                QMessageBox.critical(self, "Error", msg)
+
+    # --- PROPAGACIÓN DE DATOS A PESTAÑAS ---
+
+    def load_active_system_to_tabs(self):
+        """Carga la configuración del sistema activo en todas las pestañas"""
+        sys_path = self.project_mgr.get_active_system_path()
+        if not sys_path: return
+        
+        self.lbl_path_info.setText(f"Ruta Sistema: {sys_path}")
+        
+        self.setup_tab.update_project_data(self.project_mgr)
+        self.setup_tab.set_state(self.project_mgr.get_tab_state("setup"))
+        
+        self.topo_tab.set_state(self.project_mgr.get_tab_state("topology"))
+        mols = self.setup_tab.get_molecules_data()
+        box = self.setup_tab.get_box_size_value()
+        self.topo_tab.update_project_data(self.project_mgr, mols, box)
+        
+        self.sim_tab.update_project_data(self.project_mgr)
+        self.sim_tab.set_state(self.project_mgr.get_tab_state("simulation"))
+        
+        self.analysis_tab.update_project_data(self.project_mgr)
 
     def on_tab_changed(self, index):
-            """Sincroniza datos cuando el usuario cambia de pestaña"""
-            
-            # Si entra a Topología (Index 2)
-            if index == 2:
-                # Traer moléculas Y EL TAMAÑO DE CAJA
-                mols = self.setup_tab.get_molecules_data()
-                box_angstrom = self.setup_tab.get_box_size_value() # <--- IMPORTANTE
-                
-                # Pasar todo a Topología (incluyendo el tamaño)
-                self.topo_tab.update_project_data(self.project_mgr, mols, box_size_angstrom=box_angstrom)
-            
-            # Si entra a Simulación (Index 3)
-            if index == 3:
-                self.sim_tab.update_project_data(self.project_mgr)
-            
-            # Si entra a Análisis (Index 4)
-            if index == 4: # Análisis
-                self.analysis_tab.update_project_data(self.project_mgr)
-    
-    def load_project_handler(self):
-        """Lógica para abrir un proyecto guardado"""
-        root_path = QFileDialog.getExistingDirectory(self, "Seleccionar Carpeta del Proyecto")
-        if root_path:
-            success, msg = self.project_mgr.load_project_from_path(root_path)
-            
-            if success:
-                self.lbl_status.setText(f"✅ PROYECTO CARGADO: {self.project_mgr.project_data['name']}")
-                self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
-                
-                full_path = self.project_mgr.current_project_path
-                self.lbl_path_info.setText(f"Ruta: {full_path}")
-                
-                # Habilitar pestañas
-                self.tabs.setTabEnabled(1, True)
-                self.tabs.setTabEnabled(2, True)
-                self.tabs.setTabEnabled(3, True)
-                
-                # --- RESTAURAR ESTADOS ---
-                # 1. Setup
-                self.setup_tab.set_active_project(full_path)
-                setup_data = self.project_mgr.get_tab_state("setup")
-                self.setup_tab.set_state(setup_data)
-                
-                # 2. Topology
-                topo_data = self.project_mgr.get_tab_state("topology")
-                self.topo_tab.set_state(topo_data)
-                # Forzamos actualización de datos cruzados
-                mols = self.setup_tab.get_molecules_data()
-                box = self.setup_tab.get_box_size_value()
-                self.topo_tab.update_project_data(self.project_mgr, mols, box)
-                
-                # 3. Simulation
-                self.sim_tab.update_project_data(self.project_mgr)
-                sim_data = self.project_mgr.get_tab_state("simulation")
-                self.sim_tab.set_state(sim_data)
-
-                # 4. Analysis Tab
-                self.tabs.setTabEnabled(4, True)
-                self.analysis_tab.update_project_data(self.project_mgr)
-                
-                QMessageBox.information(self, "Carga Exitosa", "Se ha restaurado la sesión anterior.")
-            else:
-                QMessageBox.critical(self, "Error de Carga", msg)
+        self.save_all_states()
+        if index == 2: # Topología
+            mols = self.setup_tab.get_molecules_data()
+            box = self.setup_tab.get_box_size_value()
+            self.topo_tab.update_project_data(self.project_mgr, mols, box)
+        
+        if index == 3: self.sim_tab.update_project_data(self.project_mgr)
+        if index == 4: self.analysis_tab.update_project_data(self.project_mgr)
 
     def save_all_states(self):
-        """Recoge datos de todas las pestañas y guarda JSON"""
-        if not self.project_mgr.current_project_path: return
-        
+        if not self.project_mgr.active_system_name: return
         self.project_mgr.update_tab_state("setup", self.setup_tab.get_state())
         self.project_mgr.update_tab_state("topology", self.topo_tab.get_state())
         self.project_mgr.update_tab_state("simulation", self.sim_tab.get_state())
-        self.project_mgr.save_db()
 
-    # Evento de Cierre de Ventana
+    def enable_tabs(self, enable):
+        for i in range(1, 5): self.tabs.setTabEnabled(i, enable)
+    
     def closeEvent(self, event):
-        if self.project_mgr.current_project_path:
-            self.save_all_states()
-            print("Sesión guardada automáticamente.")
+        self.save_all_states()
         event.accept()

@@ -3,8 +3,8 @@ import subprocess
 import os
 
 class CommandWorker(QThread):
-    log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool, str)
+    log_signal = pyqtSignal(str)      
+    finished_signal = pyqtSignal(bool, str) 
 
     def __init__(self, command_list, working_dir, input_file_path=None):
         super().__init__()
@@ -25,15 +25,20 @@ class CommandWorker(QThread):
 
             self.log_signal.emit(f"CMD: {' '.join(self.command)}")
             
-            # Ejecución estándar (Estable)
+            # --- FIX: FORZAR SALIDA SIN BUFFER PARA VER EL AVANCE EN TIEMPO REAL ---
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            # -----------------------------------------------------------------------
+
             self.process = subprocess.Popen(
                 self.command,
                 cwd=self.wd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Fusionar errores y output
+                stderr=subprocess.STDOUT, # Unificar salida
                 stdin=file_obj,
-                text=True,    # Modo texto normal
-                bufsize=1     # Buffer de línea (estándar)
+                text=True,    
+                bufsize=1,     # Line buffered
+                env=env        # Aplicar entorno
             )
 
             # Leer línea a línea
@@ -44,7 +49,10 @@ class CommandWorker(QThread):
                 if line:
                     self.log_signal.emit(line.strip())
 
-            rc = self.process.poll()
+            # Esperar a que el proceso muera realmente
+            self.process.wait()
+            rc = self.process.returncode
+            
             if file_obj: file_obj.close()
 
             if rc == 0:
@@ -61,3 +69,4 @@ class CommandWorker(QThread):
     def stop_process(self):
         if self.process and self.process.poll() is None:
             self.process.terminate()
+            self.process.wait() # Esperar a que muera antes de seguir

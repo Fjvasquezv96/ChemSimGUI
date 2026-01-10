@@ -2,65 +2,143 @@ import os
 import re
 import datetime
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QComboBox, QTextEdit, QGroupBox, 
-    QLineEdit, QSpinBox, QDoubleSpinBox, QMessageBox, 
-    QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView, # <--- Cambio Importante
-    QTabWidget, QFormLayout, QLCDNumber, QProgressBar, QMenu
+    QWidget, 
+    QVBoxLayout, 
+    QHBoxLayout, 
+    QLabel, 
+    QPushButton, 
+    QComboBox, 
+    QTextEdit, 
+    QGroupBox, 
+    QLineEdit, 
+    QSpinBox, 
+    QDoubleSpinBox, 
+    QMessageBox, 
+    QTreeWidget, 
+    QTreeWidgetItem, 
+    QHeaderView, 
+    QAbstractItemView,
+    QTabWidget, 
+    QFormLayout, 
+    QLCDNumber, 
+    QProgressBar, 
+    QFrame, 
+    QCheckBox, 
+    QDialog, 
+    QPlainTextEdit, 
+    QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QTime
 from src.model.mdp_manager import MdpManager
 from src.controller.workers import CommandWorker
 
+# ==========================================================
+# CLASE AUXILIAR: VISOR DE LOGS
+# ==========================================================
+class LogViewerDialog(QDialog):
+    def __init__(self, log_content, title="Log de Simulación"):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.resize(700, 500)
+        
+        layout = QVBoxLayout()
+        
+        self.text_display = QPlainTextEdit()
+        self.text_display.setPlainText(log_content)
+        self.text_display.setReadOnly(True)
+        self.text_display.setStyleSheet("font-family: monospace; font-size: 10pt; background-color: #f0f0f0;")
+        
+        layout.addWidget(self.text_display)
+        
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close)
+        
+        self.setLayout(layout)
+
+# ==========================================================
+# CLASE PRINCIPAL: PESTAÑA DE SIMULACIÓN
+# ==========================================================
 class SimulationTab(QWidget):
     def __init__(self):
         super().__init__()
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        templates_path = os.path.join(base_dir, "assets", "templates")
         
+        # ---------------------------------------------------------
+        # CONFIGURACIÓN INICIAL
+        # ---------------------------------------------------------
+        
+        # Definir rutas base para las plantillas de forma absoluta
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        src_dir = os.path.dirname(current_dir)
+        templates_path = os.path.join(src_dir, "assets", "templates")
+        
+        # Instancia del gestor de archivos MDP
         self.mdp_mgr = MdpManager(templates_path)
+        
+        # Referencias al proyecto
         self.project_mgr = None
         self.current_project_path = None
+        
+        # Worker para ejecución en segundo plano
         self.worker = None 
         
-        # Ya no usamos una lista plana self.protocol_steps
-        # La "verdad" ahora reside en la estructura visual del QTreeWidget
+        # Estado del protocolo
+        self.protocol_steps = []
         
+        # Bandera para evitar bucles infinitos de actualización
         self.is_updating_ui = False
         
-        # Timer
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_elapsed_time)
-        self.elapsed_seconds_counter = 0
+        # Variables para estimación de tiempo
         self.total_steps_target = 0
         self.start_time_wall = None
         
+        # Timer para el reloj de tiempo transcurrido
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_elapsed_time)
+        self.elapsed_seconds_counter = 0
+        
+        # Construir la UI
         self.init_ui()
 
     def init_ui(self):
+        """Construye la interfaz gráfica completa"""
         layout = QVBoxLayout()
         
-        # --- 1. ÁRBOL DE PROTOCOLO ---
-        group_proto = QGroupBox("1. Árbol de Simulación (Ramificación)")
+        # ============================================================
+        # 1. ÁRBOL DE PROTOCOLO (RAMIFICACIÓN)
+        # ============================================================
+        group_proto = QGroupBox("1. Árbol de Simulación")
         layout_proto = QVBoxLayout()
         
         hbox_add = QHBoxLayout()
-        self.combo_type = QComboBox(); self.combo_type.addItems(["minim", "nvt", "npt", "prod"])
-        self.input_step_name = QLineEdit(); self.input_step_name.setPlaceholderText("Nombre del paso")
         
-        # Botones modificados para lógica de árbol
+        # Selector de Tipo
+        self.combo_type = QComboBox()
+        self.combo_type.addItems(["minim", "nvt", "npt", "prod"])
+        self.combo_type.currentIndexChanged.connect(self.update_default_name)
+        
+        # Entrada de Nombre
+        self.input_step_name = QLineEdit()
+        self.input_step_name.setPlaceholderText("Nombre del paso")
+        
+        # Botones de Árbol
         btn_add_child = QPushButton("➕ Agregar Hijo")
         btn_add_child.setToolTip("Agrega un paso derivado del nodo seleccionado")
         btn_add_child.clicked.connect(self.add_step_child)
         
         btn_del = QPushButton("➖ Eliminar Rama")
+        btn_del.setToolTip("Elimina el paso seleccionado y todos sus descendientes")
         btn_del.clicked.connect(self.remove_branch)
         
-        hbox_add.addWidget(QLabel("Tipo:")); hbox_add.addWidget(self.combo_type)
-        hbox_add.addWidget(QLabel("Nombre:")); hbox_add.addWidget(self.input_step_name)
-        hbox_add.addWidget(btn_add_child); hbox_add.addWidget(btn_del)
+        # Layout de controles
+        hbox_add.addWidget(QLabel("Tipo:"))
+        hbox_add.addWidget(self.combo_type)
+        hbox_add.addWidget(QLabel("Nombre:"))
+        hbox_add.addWidget(self.input_step_name)
+        hbox_add.addWidget(btn_add_child)
+        hbox_add.addWidget(btn_del)
         
-        # TREE WIDGET
+        # Árbol visual
         self.tree_steps = QTreeWidget()
         self.tree_steps.setHeaderLabels(["Nombre (ID)", "Tipo", "Estado"])
         self.tree_steps.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -68,156 +146,463 @@ class SimulationTab(QWidget):
         
         layout_proto.addLayout(hbox_add)
         layout_proto.addWidget(self.tree_steps)
-        group_proto.setLayout(layout_proto); layout.addWidget(group_proto)
         
-        # --- 2. CONFIGURACIÓN ---
+        group_proto.setLayout(layout_proto)
+        layout.addWidget(group_proto)
+        
+        # ============================================================
+        # 2. CONFIGURACIÓN (HORIZONTAL Y RESTRINGIDA)
+        # ============================================================
         group_edit = QGroupBox("2. Configuración del Paso Seleccionado")
         layout_edit = QVBoxLayout()
-        self.lbl_editing = QLabel("Seleccione un nodo del árbol...")
-        self.lbl_editing.setStyleSheet("color: blue; font-weight: bold;")
+        
+        self.lbl_editing = QLabel("Seleccione un nodo del árbol para configurar...")
+        self.lbl_editing.setStyleSheet("color: blue; font-weight: bold; font-size: 13px;")
         layout_edit.addWidget(self.lbl_editing)
         
         self.config_tabs = QTabWidget()
-        self.tab_basic = QWidget(); self.init_basic_ui(); self.config_tabs.addTab(self.tab_basic, "Básico")
-        self.tab_adv = QWidget(); self.init_advanced_ui(); self.config_tabs.addTab(self.tab_adv, "Avanzado")
-        self.tab_expert = QWidget(); l_exp = QVBoxLayout(); self.text_editor = QTextEdit(); self.text_editor.setStyleSheet("font-family: monospace")
-        l_exp.addWidget(self.text_editor); self.tab_expert.setLayout(l_exp); self.config_tabs.addTab(self.tab_expert, "Experto")
+        
+        # -- Tab A: Manual (Diseño Horizontal) --
+        self.tab_manual = QWidget()
+        self.init_manual_ui() 
+        self.config_tabs.addTab(self.tab_manual, "Manual (Ajustes)")
+        
+        # -- Tab B: Experto (Código Fuente) --
+        self.tab_expert = QWidget()
+        layout_expert = QVBoxLayout()
+        
+        self.text_editor = QTextEdit()
+        self.text_editor.setPlaceholderText("Aquí aparecerá el contenido del archivo .mdp...")
+        self.text_editor.setStyleSheet("font-family: Monospace; font-size: 11px; background-color: #fcfcfc;")
+        
+        layout_expert.addWidget(self.text_editor)
+        self.tab_expert.setLayout(layout_expert)
+        self.config_tabs.addTab(self.tab_expert, "Experto (Código MDP)")
+        
         layout_edit.addWidget(self.config_tabs)
+        group_edit.setLayout(layout_edit)
+        layout.addWidget(group_edit)
         
-        self.btn_save_mdp = QPushButton("💾 Guardar MDP"); self.btn_save_mdp.clicked.connect(self.save_current_mdp); self.btn_save_mdp.setEnabled(False)
-        layout_edit.addWidget(self.btn_save_mdp)
-        group_edit.setLayout(layout_edit); layout.addWidget(group_edit)
-        
-        # --- 3. MONITOR ---
-        group_run = QGroupBox("3. Monitor de Ejecución")
+        # ============================================================
+        # 3. MONITOR DE EJECUCIÓN (CON AUTO-RUN)
+        # ============================================================
+        group_run = QGroupBox("3. Motor de Ejecución")
         layout_run = QVBoxLayout()
+        
         hbox_run = QHBoxLayout()
         
-        self.btn_grompp = QPushButton("Compilar"); self.btn_grompp.clicked.connect(self.run_grompp); self.btn_grompp.setEnabled(False)
-        self.btn_mdrun = QPushButton("▶ Correr"); self.btn_mdrun.clicked.connect(self.run_mdrun); self.btn_mdrun.setEnabled(False)
-        self.btn_stop = QPushButton("⏹ Detener"); self.btn_stop.clicked.connect(self.stop_simulation); self.btn_stop.setEnabled(False); self.btn_stop.setStyleSheet("color: red")
+        # Botones de Control
+        self.btn_grompp = QPushButton("1. Compilar (grompp)")
+        self.btn_grompp.clicked.connect(self.run_grompp)
+        self.btn_grompp.setEnabled(False)
+        self.btn_grompp.setMinimumHeight(40)
         
-        hbox_run.addWidget(self.btn_grompp); hbox_run.addWidget(self.btn_mdrun); hbox_run.addWidget(self.btn_stop)
+        self.btn_mdrun = QPushButton("2. Correr (mdrun)")
+        self.btn_mdrun.clicked.connect(self.run_mdrun)
+        self.btn_mdrun.setEnabled(False)
+        self.btn_mdrun.setMinimumHeight(40)
+        self.btn_mdrun.setStyleSheet("font-weight: bold; color: green;")
         
-        hbox_info = QHBoxLayout()
-        self.lbl_elapsed = QLabel("Transcurrido: 00:00:00")
-        self.lbl_eta = QLabel("Estimación: --:--")
-        self.lbl_eta.setStyleSheet("color: blue; font-weight: bold")
-        hbox_info.addWidget(self.lbl_elapsed); hbox_info.addStretch(); hbox_info.addWidget(self.lbl_eta)
+        self.btn_stop = QPushButton("⏹ Detener")
+        self.btn_stop.clicked.connect(self.stop_simulation)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setStyleSheet("color: red;")
+        self.btn_stop.setMinimumHeight(40)
         
-        layout_run.addLayout(hbox_run); layout_run.addLayout(hbox_info)
-        group_run.setLayout(layout_run); layout.addWidget(group_run)
+        self.btn_log = QPushButton("📄 Ver Log")
+        self.btn_log.clicked.connect(self.show_log)
+        self.btn_log.setMinimumHeight(40)
+        
+        hbox_run.addWidget(self.btn_grompp)
+        hbox_run.addWidget(self.btn_mdrun)
+        hbox_run.addWidget(self.btn_stop)
+        hbox_run.addWidget(self.btn_log)
+        
+        # --- OPCIÓN AUTO-RUN ---
+        hbox_opts = QHBoxLayout()
+        self.chk_autorun = QCheckBox("🔄 Auto-Run (Ejecutar Rama Siguiente)")
+        self.chk_autorun.setToolTip("Si se activa, al terminar un paso exitosamente, iniciará automáticamente el siguiente hijo SIN detenerse.")
+        self.chk_autorun.setStyleSheet("font-weight: bold; color: #d35400;")
+        
+        hbox_opts.addStretch()
+        hbox_opts.addWidget(self.chk_autorun)
+        
+        # --- INFO DE GROMACS ---
+        self.lbl_gmx_info = QLabel("Estado: Esperando orden...")
+        self.lbl_gmx_info.setStyleSheet("font-size: 12px; font-weight: bold; background: #e6e6e6; padding: 6px; border-radius: 4px;")
+        self.lbl_gmx_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # --- INFO TIEMPO ---
+        hbox_timer = QHBoxLayout()
+        hbox_timer.addStretch()
+        hbox_timer.addWidget(QLabel("Transcurrido:"))
+        
+        self.lbl_elapsed = QLabel("00:00:00")
+        self.lbl_elapsed.setStyleSheet("font-weight: bold; color: blue; font-size: 14px;")
+        
+        hbox_timer.addWidget(self.lbl_elapsed)
+        
+        layout_run.addLayout(hbox_run)
+        layout_run.addLayout(hbox_opts) 
+        layout_run.addWidget(self.lbl_gmx_info)
+        layout_run.addLayout(hbox_timer)
+        
+        group_run.setLayout(layout_run)
+        layout.addWidget(group_run)
         
         self.setLayout(layout)
-
-    # --- UI INIT HELPERS ---
-    def init_basic_ui(self):
-        l = QFormLayout()
-        self.spin_temp = QDoubleSpinBox(); self.spin_temp.setRange(0,2000); self.spin_temp.valueChanged.connect(self.sync)
-        self.spin_press = QDoubleSpinBox(); self.spin_press.setRange(0,1000); self.spin_press.valueChanged.connect(self.sync)
-        self.spin_time = QDoubleSpinBox(); self.spin_time.setRange(0,10000); self.spin_time.valueChanged.connect(self.sync_time)
-        self.lbl_steps = QLabel("0")
-        l.addRow("Temp (K):", self.spin_temp); l.addRow("Pres (bar):", self.spin_press); l.addRow("Tiempo (ns):", self.spin_time); l.addRow("Pasos:", self.lbl_steps)
-        self.tab_basic.setLayout(l)
-
-    def init_advanced_ui(self):
-        l = QFormLayout()
-        self.c_int = QComboBox(); self.c_int.addItems(["md", "steep", "sd"]); self.c_int.currentIndexChanged.connect(self.sync)
-        self.s_dt = QDoubleSpinBox(); self.s_dt.setRange(0,0.1); self.s_dt.setDecimals(4); self.s_dt.setValue(0.002); self.s_dt.valueChanged.connect(self.sync_time)
-        self.c_t = QComboBox(); self.c_t.addItems(["V-rescale", "Nose-Hoover", "no"]); self.c_t.currentIndexChanged.connect(self.sync)
-        self.c_p = QComboBox(); self.c_p.addItems(["Parrinello-Rahman", "C-rescale", "no"]); self.c_p.currentIndexChanged.connect(self.sync)
-        l.addRow("Integrador:", self.c_int); l.addRow("dt (ps):", self.s_dt); l.addRow("Termostato:", self.c_t); l.addRow("Barostato:", self.c_p)
-        self.tab_adv.setLayout(l)
-
-    # --- SYNC LOGIC ---
-    def sync_time(self):
-        if self.is_updating_ui: return
-        nsteps = int((self.spin_time.value() * 1000) / self.s_dt.value()) if self.s_dt.value() > 0 else 0
-        self.lbl_steps.setText(str(nsteps))
-        self.sync(nsteps)
-
-    def sync(self, nsteps=None):
-        if self.is_updating_ui: return
-        p = {'ref_t': self.spin_temp.value(), 'gen_temp': self.spin_temp.value(), 'ref_p': self.spin_press.value(),
-             'integrator': self.c_int.currentText(), 'dt': self.s_dt.value(), 
-             'tcoupl': self.c_t.currentText(), 'pcoupl': self.c_p.currentText()}
-        if nsteps: p['nsteps'] = nsteps
-        self.is_updating_ui = True
-        self.text_editor.setPlainText(self.mdp_mgr.update_parameters(self.text_editor.toPlainText(), p))
-        self.is_updating_ui = False
+        
+        # Setear nombre inicial por defecto
+        self.update_default_name()
 
     # ============================================================
-    # GESTIÓN DEL ÁRBOL (BRANCHING)
+    # INICIALIZACIÓN DE UI MANUAL (DISEÑO HORIZONTAL)
+    # ============================================================
+    def init_manual_ui(self):
+        """Crea la interfaz de configuración dividida en 2 columnas"""
+        h_layout = QHBoxLayout()
+        
+        # --- COLUMNA IZQUIERDA: PARÁMETROS DE CONTROL ---
+        left_widget = QWidget()
+        form_control = QFormLayout()
+        
+        self.spin_time_ns = QDoubleSpinBox()
+        self.spin_time_ns.setRange(0, 10000)
+        self.spin_time_ns.setSingleStep(0.1)
+        self.spin_time_ns.setSuffix(" ns")
+        self.spin_time_ns.setValue(5.0) # Default general
+        self.spin_time_ns.valueChanged.connect(self.on_time_changed) 
+        
+        self.combo_integrator = QComboBox()
+        self.combo_integrator.addItems(["md (Leap-frog)", "steep (Minimización)", "sd (Langevin)"])
+        self.combo_integrator.currentIndexChanged.connect(self.sync_gui_to_text)
+        
+        self.spin_dt = QDoubleSpinBox()
+        self.spin_dt.setRange(0.0001, 0.010)
+        self.spin_dt.setDecimals(4)
+        self.spin_dt.setSuffix(" ps")
+        self.spin_dt.setValue(0.002)
+        self.spin_dt.valueChanged.connect(self.on_dt_changed) 
+        
+        self.lbl_steps_calc = QLabel("Pasos: 0 (Calculado)")
+        self.lbl_steps_calc.setStyleSheet("color: gray; font-style: italic;")
+        
+        form_control.addRow(QLabel("<b>CONTROL:</b>"))
+        form_control.addRow("Integrador:", self.combo_integrator)
+        form_control.addRow("Paso (dt):", self.spin_dt)
+        form_control.addRow("Duración:", self.spin_time_ns)
+        form_control.addRow("", self.lbl_steps_calc)
+        
+        left_widget.setLayout(form_control)
+        
+        # --- COLUMNA DERECHA: FÍSICA (TEMP/PRES) ---
+        right_widget = QWidget()
+        vbox_right = QVBoxLayout()
+        
+        # Grupo Temperatura
+        self.group_temp = QGroupBox("Temperatura")
+        form_temp = QFormLayout()
+        
+        self.spin_temp = QDoubleSpinBox()
+        self.spin_temp.setRange(0, 5000)
+        self.spin_temp.setSuffix(" K")
+        self.spin_temp.setValue(298.15) # Default
+        self.spin_temp.valueChanged.connect(self.sync_gui_to_text)
+        
+        self.combo_tcoupl = QComboBox()
+        self.combo_tcoupl.addItems(["V-rescale", "Nose-Hoover", "Berendsen", "no"])
+        self.combo_tcoupl.currentIndexChanged.connect(self.sync_gui_to_text)
+        
+        form_temp.addRow("Ref T:", self.spin_temp)
+        form_temp.addRow("Termostato:", self.combo_tcoupl)
+        self.group_temp.setLayout(form_temp)
+        
+        # Grupo Presión
+        self.group_press = QGroupBox("Presión")
+        form_press = QFormLayout()
+        
+        self.spin_press = QDoubleSpinBox()
+        self.spin_press.setRange(0, 2000)
+        self.spin_press.setSuffix(" bar")
+        self.spin_press.setValue(1.0) # Default
+        self.spin_press.valueChanged.connect(self.sync_gui_to_text)
+        
+        self.combo_pcoupl = QComboBox()
+        self.combo_pcoupl.addItems(["Parrinello-Rahman", "C-rescale", "Berendsen", "no"])
+        self.combo_pcoupl.currentIndexChanged.connect(self.sync_gui_to_text)
+        
+        form_press.addRow("Ref P:", self.spin_press)
+        form_press.addRow("Barostato:", self.combo_pcoupl)
+        self.group_press.setLayout(form_press)
+        
+        vbox_right.addWidget(self.group_temp)
+        vbox_right.addWidget(self.group_press)
+        right_widget.setLayout(vbox_right)
+        
+        # Añadir al layout principal
+        h_layout.addWidget(left_widget)
+        
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        h_layout.addWidget(line)
+        
+        h_layout.addWidget(right_widget)
+        
+        self.tab_manual.setLayout(h_layout)
+
+    # ============================================================
+    # LÓGICA DE INTERFAZ DINÁMICA (RESTRICCIONES)
+    # ============================================================
+    def toggle_ui_elements(self, step_type):
+        """Habilita/Deshabilita controles según el tipo de simulación"""
+        
+        # 1. Minimización
+        if step_type == 'minim':
+            self.spin_time_ns.setEnabled(False) 
+            self.lbl_steps_calc.setText("Pasos definidos por nsteps/emtol")
+            
+            self.group_temp.setEnabled(False)
+            self.group_press.setEnabled(False)
+            
+        # 2. NVT
+        elif step_type == 'nvt':
+            self.spin_time_ns.setEnabled(True)
+            self.group_temp.setEnabled(True)
+            self.group_press.setEnabled(False) # Bloquear presión
+            
+        # 3. NPT / Prod
+        else:
+            self.spin_time_ns.setEnabled(True)
+            self.group_temp.setEnabled(True)
+            self.group_press.setEnabled(True)
+
+    def update_default_name(self):
+        """Sugiere nombre basado en tipo"""
+        idx = self.combo_type.currentIndex()
+        if idx == 0:
+            self.input_step_name.setText("minim")
+        elif idx == 1:
+            self.input_step_name.setText("gen") 
+        elif idx == 2:
+            self.input_step_name.setText("equil") 
+        elif idx == 3:
+            self.input_step_name.setText("prod") 
+
+    # ============================================================
+    # LÓGICA DE SINCRONIZACIÓN AUTOMÁTICA
     # ============================================================
     
-    def add_step_child(self):
-        # 1. Obtener nodo padre seleccionado
-        current_item = self.tree_steps.currentItem()
+    def on_time_changed(self):
+        if self.is_updating_ui:
+            return
         
-        # Si no hay nada seleccionado, el padre es "Root" (System)
-        # Pero visualmente los pondremos en el nivel superior
+        ns = self.spin_time_ns.value()
+        dt_ps = self.spin_dt.value()
+        
+        if dt_ps <= 0:
+            return
+        
+        nsteps = int((ns * 1000.0) / dt_ps)
+        self.lbl_steps_calc.setText(f"Pasos: {nsteps}")
+        
+        self.sync_gui_to_text(nsteps_override=nsteps)
+
+    def on_dt_changed(self):
+        self.on_time_changed()
+
+    def load_mdp_values_to_gui(self, content):
+        """Lee el texto del archivo .mdp y actualiza los controles visuales"""
+        self.is_updating_ui = True 
+        
+        try:
+            match_dt = re.search(r"dt\s*=\s*([\d\.]+)", content)
+            if match_dt:
+                dt_val = float(match_dt.group(1))
+                self.spin_dt.setValue(dt_val)
+
+            match_steps = re.search(r"nsteps\s*=\s*(\d+)", content)
+            if match_steps and 'dt_val' in locals():
+                steps_val = int(match_steps.group(1))
+                ns_val = (steps_val * dt_val) / 1000.0
+                self.spin_time_ns.setValue(ns_val)
+                self.lbl_steps_calc.setText(f"Pasos: {steps_val}")
+
+            match_temp = re.search(r"ref_t\s*=\s*([\d\.]+)", content)
+            if match_temp: self.spin_temp.setValue(float(match_temp.group(1)))
+
+            match_pres = re.search(r"ref_p\s*=\s*([\d\.]+)", content)
+            if match_pres: self.spin_press.setValue(float(match_pres.group(1)))
+
+            match_int = re.search(r"integrator\s*=\s*(\w+)", content)
+            if match_int:
+                idx = self.combo_integrator.findText(match_int.group(1), Qt.MatchFlag.MatchStartsWith)
+                if idx >= 0: self.combo_integrator.setCurrentIndex(idx)
+
+            match_tc = re.search(r"tcoupl\s*=\s*([\w\-]+)", content)
+            if match_tc:
+                idx = self.combo_tcoupl.findText(match_tc.group(1))
+                if idx >= 0: self.combo_tcoupl.setCurrentIndex(idx)
+                
+            match_pc = re.search(r"pcoupl\s*=\s*([\w\-]+)", content)
+            if match_pc:
+                idx = self.combo_pcoupl.findText(match_pc.group(1))
+                if idx >= 0: self.combo_pcoupl.setCurrentIndex(idx)
+                
+        except Exception as e:
+            print(f"Error parseando MDP a GUI: {e}")
+        
+        self.is_updating_ui = False
+
+    def sync_gui_to_text(self, nsteps_override=None):
+        """Toma valores de la GUI y actualiza el texto MDP"""
+        if self.is_updating_ui:
+            return
+        
+        current_item = self.tree_steps.currentItem()
+        step_type = current_item.text(1) if current_item else "prod"
+        
+        params = {}
+        params['integrator'] = self.combo_integrator.currentText().split()[0]
+        params['dt'] = self.spin_dt.value()
+        
+        if nsteps_override: params['nsteps'] = nsteps_override
+        
+        if step_type != 'minim':
+            params['ref_t'] = self.spin_temp.value()
+            params['gen_temp'] = self.spin_temp.value()
+            params['tcoupl'] = self.combo_tcoupl.currentText()
+            
+            if step_type in ['npt', 'prod']:
+                params['ref_p'] = self.spin_press.value()
+                params['pcoupl'] = self.combo_pcoupl.currentText()
+            else:
+                params['pcoupl'] = "no"
+        else:
+            params['pcoupl'] = "no"
+            params['tcoupl'] = "no"
+            params['gen_vel'] = "no"
+        
+        current_text = self.text_editor.toPlainText()
+        new_text = self.mdp_mgr.update_parameters(current_text, params)
+        
+        self.is_updating_ui = True
+        self.text_editor.setPlainText(new_text)
+        self.is_updating_ui = False
+        
+        self.save_mdp_to_disk()
+
+    # ============================================================
+    # GESTIÓN DEL ÁRBOL
+    # ============================================================
+
+    def on_node_selected(self, item, col):
+        storage_dir = self.get_storage_path()
+        if not storage_dir: return
+        
+        self.is_updating_ui = True 
+        
+        name = item.text(0)
+        step_type = item.text(1)
+        
+        parent_name = item.parent().text(0) if item.parent() else "Sistema (Raíz)"
+        self.lbl_editing.setText(f"Editando: {name} ({step_type}) | Padre: {parent_name}")
+        
+        self.toggle_ui_elements(step_type)
+        
+        mdp_path = os.path.join(storage_dir, f"{name}.mdp")
+        file_exists = os.path.exists(mdp_path)
+        
+        if file_exists:
+            with open(mdp_path, 'r') as f:
+                content = f.read()
+        else:
+            content = self.mdp_mgr.get_template_content(step_type)
+        
+        self.text_editor.setPlainText(content)
+        
+        if file_exists:
+            self.load_mdp_values_to_gui(content)
+        else:
+            # Defaults si es nuevo
+            if step_type == 'minim':
+                self.combo_integrator.setCurrentIndex(1)
+            else:
+                self.combo_integrator.setCurrentIndex(0)
+                self.spin_temp.setValue(298.15)
+                
+                if step_type == 'nvt':
+                    self.spin_time_ns.setValue(5.0)
+                    self.combo_pcoupl.setCurrentIndex(3)
+                elif step_type == 'npt':
+                    self.spin_time_ns.setValue(10.0)
+                    self.spin_press.setValue(1.0)
+                    self.combo_pcoupl.setCurrentIndex(1)
+                elif step_type == 'prod':
+                    self.spin_time_ns.setValue(5.0)
+                    self.spin_press.setValue(1.0)
+                    self.combo_pcoupl.setCurrentIndex(0)
+            
+            self.is_updating_ui = False
+            self.sync_gui_to_text()
+
+        self.btn_grompp.setEnabled(True)
+        self.btn_mdrun.setEnabled(False)
+        self.is_updating_ui = False
+
+    def add_step_child(self):
+        current_item = self.tree_steps.currentItem()
         parent_item = current_item if current_item else self.tree_steps.invisibleRootItem()
         
         step_type = self.combo_type.currentText()
         name = self.input_step_name.text().strip()
         
         if not name:
-            QMessageBox.warning(self, "Error", "Escriba un nombre único para el paso.")
+            QMessageBox.warning(self, "Error", "Escriba un nombre.")
             return
             
-        # Validar duplicados (recursivo o global)
-        # Por simplicidad, validamos globalmente en el directorio storage
         if self.current_project_path:
-            if os.path.exists(os.path.join(self.current_project_path, "storage", f"{name}.mdp")):
-                QMessageBox.warning(self, "Error", f"El nombre '{name}' ya existe en el proyecto.")
+             if os.path.exists(os.path.join(self.current_project_path, "storage", f"{name}.mdp")):
+                QMessageBox.warning(self, "Error", "Nombre duplicado.")
                 return
 
-        # Crear Nodo
         item = QTreeWidgetItem(parent_item)
         item.setText(0, name)
         item.setText(1, step_type)
         item.setText(2, "Pendiente")
         
-        # Expandir padre para ver el hijo
-        if current_item: current_item.setExpanded(True)
+        if current_item:
+            current_item.setExpanded(True)
+            
         self.input_step_name.clear()
+        
+        self.tree_steps.setCurrentItem(item)
+        self.on_node_selected(item, 0)
+        
+        next_type_idx = self.combo_type.currentIndex() + 1
+        if next_type_idx < self.combo_type.count():
+            self.combo_type.setCurrentIndex(next_type_idx)
 
     def remove_branch(self):
         item = self.tree_steps.currentItem()
         if not item: return
-        
-        reply = QMessageBox.question(self, "Eliminar", f"¿Eliminar '{item.text(0)}' y sus hijos?",
+        reply = QMessageBox.question(self, "Eliminar", f"¿Eliminar '{item.text(0)}' y rama?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             (item.parent() or self.tree_steps.invisibleRootItem()).removeChild(item)
 
-    def on_node_selected(self, item, col):
-        if not self.current_project_path: return
-        self.is_updating_ui = True
-        
-        name = item.text(0)
-        sType = item.text(1)
-        self.lbl_editing.setText(f"Editando: {name} (Hijo de: {item.parent().text(0) if item.parent() else 'Sistema'})")
-        
-        path = os.path.join(self.current_project_path, "storage", f"{name}.mdp")
-        content = open(path).read() if os.path.exists(path) else self.mdp_mgr.get_template_content(sType)
-        self.text_editor.setPlainText(content)
-        
-        # Defaults
-        is_min = sType == 'minim'
-        self.spin_time.setEnabled(not is_min); self.spin_press.setEnabled(not is_min)
-        if is_min: self.c_int.setCurrentIndex(1)
-        else: self.c_int.setCurrentIndex(0)
-        
-        self.btn_save_mdp.setEnabled(True); self.btn_grompp.setEnabled(True); self.btn_mdrun.setEnabled(False)
-        self.is_updating_ui = False; self.sync()
+    # ============================================================
+    # PERSISTENCIA
+    # ============================================================
+    def update_project_data(self, project_mgr):
+        self.project_mgr = project_mgr
 
-    # ============================================================
-    # PERSISTENCIA RECURSIVA (ÁRBOL -> JSON -> ÁRBOL)
-    # ============================================================
-    
+    def get_storage_path(self):
+        if self.project_mgr:
+            return self.project_mgr.get_active_system_path()
+        return None
+
     def get_state(self):
-        """Convierte el árbol visual a una estructura de lista recursiva"""
         def serialize_item(item):
             node = {
                 "name": item.text(0),
@@ -236,7 +621,6 @@ class SimulationTab(QWidget):
     def set_state(self, state):
         if not state: return
         self.tree_steps.clear()
-        
         def deserialize_item(node_data, parent):
             item = QTreeWidgetItem(parent)
             item.setText(0, node_data["name"])
@@ -244,9 +628,10 @@ class SimulationTab(QWidget):
             st = node_data.get("status", "Pendiente")
             item.setText(2, st)
             
-            # Colores
-            if st == 'Completado': item.setForeground(2, Qt.GlobalColor.green)
-            elif st == 'Error': item.setForeground(2, Qt.GlobalColor.red)
+            if st == 'Completado':
+                item.setForeground(2, Qt.GlobalColor.green)
+            elif st == 'Error':
+                item.setForeground(2, Qt.GlobalColor.red)
             
             for child_data in node_data.get("children", []):
                 deserialize_item(child_data, item)
@@ -255,94 +640,179 @@ class SimulationTab(QWidget):
         for node in state.get("tree_data", []):
             deserialize_item(node, self.tree_steps)
 
-    def update_project_data(self, mgr):
-        self.project_mgr = mgr; self.current_project_path = mgr.current_project_path
-
-    # ============================================================
-    # EJECUCIÓN CON RAMIFICACIÓN
-    # ============================================================
+    def save_mdp_to_disk(self):
+        item = self.tree_steps.currentItem()
+        storage_dir = self.get_storage_path()
+        if not item or not storage_dir:
+            return
+        path = os.path.join(storage_dir, f"{item.text(0)}.mdp")
+        self.mdp_mgr.save_mdp(path, self.text_editor.toPlainText())
 
     def save_current_mdp(self):
-        item = self.tree_steps.currentItem()
-        if not item: return
-        path = os.path.join(self.current_project_path, "storage", f"{item.text(0)}.mdp")
-        if self.mdp_mgr.save_mdp(path, self.text_editor.toPlainText())[0]:
-            QMessageBox.information(self, "OK", "Guardado")
+        """Wrapper para el botón manual"""
+        self.save_mdp_to_disk()
+        QMessageBox.information(self, "OK", "Guardado")
+
+    # ============================================================
+    # EJECUCIÓN CON AUTO-RUN CORREGIDO (NON-BLOCKING)
+    # ============================================================
+    def get_chain_files(self, item):
+        name = item.text(0)
+        d = self.get_storage_path()
+        if not d: return None
+        
+        parent = item.parent()
+        input_gro = f"{parent.text(0)}.gro" if parent else "system.gro"
+            
+        if not os.path.exists(os.path.join(d, input_gro)):
+            QMessageBox.warning(self, "Bloqueo", f"Falta input: {input_gro}")
+            return None
+        
+        return f"{name}.mdp", input_gro, f"{name}.tpr"
 
     def run_grompp(self):
         item = self.tree_steps.currentItem()
         if not item: return
         
-        current_name = item.text(0)
-        parent_item = item.parent()
+        self.save_mdp_to_disk()
+        files = self.get_chain_files(item)
+        if not files: return
         
-        # DETERMINAR INPUT:
-        # Si tiene padre -> Output del padre (padre.gro)
-        # Si no tiene padre -> system.gro (Salida de Topología)
-        if parent_item:
-            input_gro = f"{parent_item.text(0)}.gro"
-        else:
-            input_gro = "system.gro"
-            
-        storage_dir = os.path.join(self.current_project_path, "storage")
+        mdp, gro, tpr = files
+        storage_dir = self.get_storage_path()
         
-        if not os.path.exists(os.path.join(storage_dir, input_gro)):
-            QMessageBox.warning(self, "Bloqueo", f"No se encuentra el input: {input_gro}\nEjecute el paso padre primero.")
-            return
-            
-        mdp_file = f"{current_name}.mdp"
-        if not os.path.exists(os.path.join(storage_dir, mdp_file)):
-            QMessageBox.warning(self, "Error", "Guarde MDP primero.")
+        if not os.path.exists(os.path.join(storage_dir, mdp)):
+            QMessageBox.warning(self, "Aviso", "MDP no encontrado.")
             return
 
-        cmd = ["gmx", "grompp", "-f", mdp_file, "-c", input_gro, "-p", "topol.top", "-o", f"{current_name}.tpr", "-maxwarn", "2"]
+        cmd = ["gmx", "grompp", "-f", mdp, "-c", gro, "-p", "topol.top", "-o", tpr, "-maxwarn", "2"]
         
         self.worker = CommandWorker(cmd, storage_dir)
-        self.worker.log_signal.connect(lambda s: print(f"GMX: {s}"))
+        self.worker.log_signal.connect(lambda s: print(f"GROMPP: {s}"))
         self.worker.finished_signal.connect(self.on_grompp_finished)
-        self.btn_grompp.setEnabled(False); self.worker.start()
+        
+        self.btn_grompp.setEnabled(False)
+        self.worker.start()
 
-    def on_grompp_finished(self, s, m):
+    def on_grompp_finished(self, success, msg):
         self.btn_grompp.setEnabled(True)
-        if s: QMessageBox.information(self, "OK", "TPR Generado"); self.btn_mdrun.setEnabled(True)
-        else: QMessageBox.critical(self, "Error", m)
+        if success:
+            # FIX AUTO-RUN: Si es auto-run, NO mostrar popup y seguir
+            if self.chk_autorun.isChecked():
+                self.run_mdrun()
+            else:
+                QMessageBox.information(self, "Éxito", "Compilación exitosa.")
+                self.btn_mdrun.setEnabled(True)
+        else:
+            QMessageBox.critical(self, "Error", msg)
 
     def run_mdrun(self):
         item = self.tree_steps.currentItem()
-        name = item.text(0)
+        if not item: return
         
-        # Calcular pasos para barra
-        ns = self.spin_time.value(); dt = self.s_dt.value()
-        self.total_steps_target = int((ns*1000)/dt) if dt > 0 and item.text(1) != 'minim' else 50000
+        n = item.text(0)
+        d = self.get_storage_path()
         
-        cmd = ["gmx", "mdrun", "-v", "-deffnm", name]
-        self.worker = CommandWorker(cmd, os.path.join(self.current_project_path, "storage"))
-        self.worker.log_signal.connect(self.parse_log)
+        if not os.path.exists(os.path.join(d, f"{n}.tpr")):
+            QMessageBox.warning(self, "Error", "No se encontró .tpr")
+            return
+        
+        typ = item.text(1)
+        if typ == 'minim':
+            self.total_steps_target = 50000 
+        else:
+            ns = self.spin_time_ns.value()
+            dt = self.spin_dt.value()
+            if dt > 0: 
+                self.total_steps_target = int((ns * 1000) / dt)
+            else: 
+                self.total_steps_target = 100000
+        
+        cmd = ["gmx", "mdrun", "-v", "-deffnm", n]
+        
+        self.worker = CommandWorker(cmd, d)
+        self.worker.log_signal.connect(self.parse_log_output)
         self.worker.finished_signal.connect(self.on_mdrun_finished)
         
-        self.btn_grompp.setEnabled(False); self.btn_mdrun.setEnabled(False); self.btn_stop.setEnabled(True)
-        item.setText(2, "Corriendo..."); item.setForeground(2, Qt.GlobalColor.blue)
-        self.elapsed_seconds_counter = 0; self.timer.start(1000); self.worker.start()
+        self.btn_grompp.setEnabled(False)
+        self.btn_mdrun.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        
+        item.setText(2, "Corriendo...")
+        item.setForeground(2, Qt.GlobalColor.blue)
+        self.lbl_gmx_info.setText("Iniciando...")
+        
+        self.elapsed_seconds_counter = 0
+        self.timer.start(1000)
+        self.start_time_wall = datetime.datetime.now()
+        
+        self.worker.start()
 
     def stop_simulation(self):
-        if self.worker: self.worker.stop_process()
+        if self.worker:
+            self.worker.stop_process()
 
-    def on_mdrun_finished(self, s, m):
+    def on_mdrun_finished(self, success, msg):
         self.timer.stop()
         item = self.tree_steps.currentItem()
-        self.btn_grompp.setEnabled(True); self.btn_mdrun.setEnabled(True); self.btn_stop.setEnabled(False)
-        item.setText(2, "Completado" if s else "Error")
-        item.setForeground(2, Qt.GlobalColor.green if s else Qt.GlobalColor.red)
-        if s: self.lbl_eta.setText("Finalizado"); QMessageBox.information(self, "Fin", "Terminó.")
-        else: QMessageBox.warning(self, "Error", m)
+        
+        self.btn_grompp.setEnabled(True)
+        self.btn_mdrun.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        
+        item.setText(2, "Completado" if success else "Error")
+        item.setForeground(2, Qt.GlobalColor.green if success else Qt.GlobalColor.red)
+        
+        if success:
+            self.lbl_gmx_info.setText("FINALIZADO")
+            
+            # --- AUTO-RUN FIX: SIN POPUP ---
+            if self.chk_autorun.isChecked():
+                if item.childCount() > 0:
+                    child = item.child(0)
+                    if child.text(2) == "Pendiente":
+                        self.lbl_gmx_info.setText(f"Auto-Run: Iniciando {child.text(0)}...")
+                        self.tree_steps.setCurrentItem(child)
+                        self.on_node_selected(child, 0)
+                        
+                        self.save_mdp_to_disk()
+                        
+                        QTimer.singleShot(1500, self.run_grompp)
+                        return # IMPORTANTE: Retornar para NO mostrar popup
+            
+            # Solo mostrar popup si no hay auto-run o se terminó la cadena
+            QMessageBox.information(self, "Fin", "Simulación terminada.")
+        else:
+            QMessageBox.warning(self, "Error", msg)
 
-    def parse_log(self, text):
-        line = text.strip()
-        if "finish time" in line.lower(): self.lbl_eta.setText(line.split(":",1)[1].strip())
-        if "Rem:" in line: 
-            try: self.lbl_eta.setText("Faltan: " + line.split("Rem:")[1].split("  ")[0])
-            except: pass
-    
+    # --- LOGS Y PARSING ---
+    def show_log(self):
+        item = self.tree_steps.currentItem()
+        storage_dir = self.get_storage_path()
+        if not item or not storage_dir: return
+        
+        log_path = os.path.join(storage_dir, f"{item.text(0)}.log")
+        if os.path.exists(log_path):
+            with open(log_path, 'r') as f:
+                content = f.read()
+            dlg = LogViewerDialog(content, f"Log de {item.text(0)}")
+            dlg.exec()
+        else:
+            QMessageBox.information(self, "Info", "No hay log disponible.")
+
     def update_elapsed_time(self):
         self.elapsed_seconds_counter += 1
-        self.lbl_elapsed.setText("Transcurrido: " + str(datetime.timedelta(seconds=self.elapsed_seconds_counter)))
+        self.lbl_elapsed.setText(str(datetime.timedelta(seconds=self.elapsed_seconds_counter)))
+
+    def parse_log_output(self, text):
+        line = text.strip()
+        if "finish time" in line.lower(): 
+            try: self.lbl_gmx_info.setText(f"Fin: {line.split(':',1)[1].strip()}")
+            except: pass
+        if "Rem:" in line: 
+            try: self.lbl_gmx_info.setText(f"Faltan: {line.split('Rem:')[1].split('  ')[0]}")
+            except: pass
+        match = re.search(r"^\s*(\d+)\s+[\d\.]+", line)
+        if match: 
+            if "GMX" not in self.lbl_gmx_info.text():
+                self.lbl_gmx_info.setText(f"Paso {match.group(1)}")

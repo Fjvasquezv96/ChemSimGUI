@@ -1,9 +1,11 @@
 import os
 import shutil
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, 
-                             QGroupBox, QFormLayout, QFileDialog, QMessageBox, 
-                             QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QListWidget, QHBoxLayout, QCheckBox)
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QPushButton, 
+    QGroupBox, QFormLayout, QFileDialog, QMessageBox, 
+    QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QListWidget, QHBoxLayout, QCheckBox
+)
 from PyQt6.QtCore import Qt
 from src.model.chemistry_tools import ChemistryTools
 from src.controller.workers import CommandWorker
@@ -11,100 +13,153 @@ from src.controller.workers import CommandWorker
 class TopologyTab(QWidget):
     def __init__(self):
         super().__init__()
+        
+        # Instancias de lógica
         self.chem_tools = ChemistryTools()
+        
+        # Referencias al estado del proyecto
         self.project_mgr = None 
         self.current_project_path = None
+        
+        # Datos temporales
         self.molecules_data = [] 
-        self.global_includes = []
         self.box_size_nm = 0.0
+        
+        # Inicializar interfaz
         self.init_ui()
 
     def init_ui(self):
+        """Construye la interfaz gráfica"""
         layout = QVBoxLayout()
         
-        # --- SECCIÓN 1: Estado de Estructura (Automático) ---
+        # ==========================================================
+        # SECCIÓN 1: ESTRUCTURA (AUTOMATIZACIÓN SYSTEM.GRO)
+        # ==========================================================
         group_struc = QGroupBox("1. Estructura (system.gro)")
-        l_struc = QVBoxLayout()
+        layout_struc = QVBoxLayout()
         
-        # En lugar de un botón, usamos una etiqueta informativa
+        # Etiqueta de estado que reemplaza al botón manual
+        # Informa al usuario lo que está pasando en background
         self.lbl_gro_status = QLabel("Estado: Esperando datos...")
         self.lbl_gro_status.setStyleSheet("color: gray; font-style: italic;")
         self.lbl_gro_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        l_struc.addWidget(self.lbl_gro_status)
-        group_struc.setLayout(l_struc)
+        layout_struc.addWidget(self.lbl_gro_status)
+        
+        group_struc.setLayout(layout_struc)
         layout.addWidget(group_struc)
         
-        # --- SECCIÓN 2: Topología ---
+        # ==========================================================
+        # SECCIÓN 2: CONSTRUCTOR DE TOPOLOGÍA
+        # ==========================================================
         group_top = QGroupBox("2. Constructor de Topología (topol.top)")
-        l_top = QVBoxLayout()
+        layout_top = QVBoxLayout()
         
-        # Forcefield
+        # Selector de Campo de Fuerza
+        form_ff = QFormLayout()
         self.combo_ff = QComboBox()
         self.combo_ff.addItems(["oplsaa.ff", "amber99sb.ff", "charmm36.ff", "gromos54a7.ff"])
-        l_top.addWidget(QLabel("Forcefield:"))
-        l_top.addWidget(self.combo_ff)
         
-        # Sanitización
+        form_ff.addRow("Campo de Fuerza Base:", self.combo_ff)
+        layout_top.addLayout(form_ff)
+        
+        # Opción de Sanitización (Auto-corrección)
         self.chk_sanitize = QCheckBox("🛠️ Auto-corregir ITPs (Extraer [atomtypes] y evitar colisiones)")
         self.chk_sanitize.setChecked(True)
-        l_top.addWidget(self.chk_sanitize)
+        self.chk_sanitize.setToolTip("Separa los atomtypes en un archivo maestro y renombra átomos duplicados.")
+        layout_top.addWidget(self.chk_sanitize)
         
-        # Includes Globales
-        l_top.addWidget(QLabel("Includes Globales Manuales:"))
+        # Lista de Includes Globales
+        layout_top.addWidget(QLabel("Includes Globales Manuales (ej: atomtypes extra):"))
         self.list_globals = QListWidget()
         self.list_globals.setMaximumHeight(60)
-        l_top.addWidget(self.list_globals)
+        layout_top.addWidget(self.list_globals)
         
-        h_glob = QHBoxLayout()
-        b_add_g = QPushButton("Cargar Global"); b_add_g.clicked.connect(self.add_global_include)
-        b_del_g = QPushButton("Borrar"); b_del_g.clicked.connect(self.remove_global_include)
-        h_glob.addWidget(b_add_g); h_glob.addWidget(b_del_g)
-        l_top.addLayout(h_glob)
+        # Botones para Includes Globales
+        hbox_glob = QHBoxLayout()
+        btn_add_glob = QPushButton("Cargar Include (.itp)")
+        btn_add_glob.clicked.connect(self.add_global_include)
+        
+        btn_del_glob = QPushButton("Borrar Seleccionado")
+        btn_del_glob.clicked.connect(self.remove_global_include)
+        
+        hbox_glob.addWidget(btn_add_glob)
+        hbox_glob.addWidget(btn_del_glob)
+        layout_top.addLayout(hbox_glob)
 
-        # Tabla Moléculas
-        l_top.addWidget(QLabel("Asignación de ITPs por Molécula:"))
+        # Tabla de Asignación de Moléculas
+        layout_top.addWidget(QLabel("Asignación de Topologías por Componente:"))
         self.table_mols = QTableWidget()
         self.table_mols.setColumnCount(3)
-        self.table_mols.setHorizontalHeaderLabels(["PDB Input", "Nombre Topología", "Archivo .itp"])
+        self.table_mols.setHorizontalHeaderLabels([
+            "Componente (Input)", 
+            "Nombre [ moleculetype ]", 
+            "Archivo .itp"
+        ])
         self.table_mols.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        l_top.addWidget(self.table_mols)
+        layout_top.addWidget(self.table_mols)
         
+        # Opciones finales (Agua)
         self.chk_water = QCheckBox("Incluir Agua Estándar (spce/ions)")
-        self.chk_water.setChecked(False) 
-        l_top.addWidget(self.chk_water)
+        self.chk_water.setChecked(False) # Default false para control total
+        layout_top.addWidget(self.chk_water)
 
-        self.btn_gen = QPushButton("Generar topol.top")
-        self.btn_gen.clicked.connect(self.generate_topology)
-        self.btn_gen.setEnabled(False)
-        self.btn_gen.setStyleSheet("color: green; font-weight: bold;")
-        l_top.addWidget(self.btn_gen)
+        # Botón de Generación Final
+        self.btn_gen_top = QPushButton("Generar topol.top")
+        self.btn_gen_top.clicked.connect(self.generate_topology)
+        self.btn_gen_top.setEnabled(False)
+        self.btn_gen_top.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
         
-        group_top.setLayout(l_top)
+        layout_top.addWidget(self.btn_gen_top)
+        
+        group_top.setLayout(layout_top)
         layout.addWidget(group_top)
+        
+        layout.addStretch()
         self.setLayout(layout)
 
-    # --- LÓGICA AUTOMÁTICA ---
+    # ==========================================================
+    # LÓGICA DE SISTEMA (RUTAS DINÁMICAS)
+    # ==========================================================
+
+    def get_storage_path(self):
+        """Obtiene la ruta de almacenamiento del SISTEMA ACTIVO"""
+        if self.project_mgr:
+            return self.project_mgr.get_active_system_path()
+        return None
 
     def update_project_data(self, project_mgr, molecules, box_size_angstrom=0.0):
         """
-        Se llama automáticamente cuando el usuario entra a esta pestaña.
-        Aquí disparamos la conversión automática.
+        Se llama automáticamente cuando el usuario entra a esta pestaña o cambia de sistema.
+        Recibe los datos frescos de SetupTab.
         """
         self.project_mgr = project_mgr
         self.current_project_path = project_mgr.current_project_path
+        
         self.molecules_data = molecules
+        
+        # Convertir Å a nm (GROMACS usa nm)
         self.box_size_nm = box_size_angstrom / 10.0
         
-        self.btn_gen.setEnabled(True)
+        # Habilitar interfaz
+        self.btn_gen_top.setEnabled(True)
+        
+        # Refrescar la tabla con los datos nuevos
         self.refresh_table()
 
         # DISPARO AUTOMÁTICO DE EDITCONF
         self.run_editconf_auto()
 
+    # ==========================================================
+    # AUTOMATIZACIÓN DE ESTRUCTURA (EDITCONF)
+    # ==========================================================
+
     def run_editconf_auto(self):
-        """Ejecuta editconf en segundo plano sin molestar al usuario"""
-        storage_dir = os.path.join(self.current_project_path, "storage")
+        """Ejecuta editconf en segundo plano para aplicar el tamaño de caja"""
+        storage_dir = self.get_storage_path()
+        if not storage_dir:
+            return
+            
         pdb_file = os.path.join(storage_dir, "system_init.pdb")
         
         if not os.path.exists(pdb_file):
@@ -116,177 +171,239 @@ class TopologyTab(QWidget):
             self.lbl_gro_status.setText("⚠️ Alerta: Tamaño de caja es 0 (Configure en Pestaña 2)")
             return
 
-        # Actualizar UI para mostrar que estamos trabajando
+        # Actualizar UI para mostrar trabajo
         self.lbl_gro_status.setText("⏳ Generando system.gro con dimensiones actualizadas...")
         self.lbl_gro_status.setStyleSheet("color: blue;")
 
+        # Comando con caja explícita (-box)
         val = str(self.box_size_nm)
         cmd = ["gmx", "editconf", "-f", "system_init.pdb", "-o", "system.gro", "-box", val, val, val]
         
         self.worker = CommandWorker(cmd, storage_dir)
-        # No usamos popups, solo actualizamos la etiqueta al terminar
+        # Conectar señal de fin
         self.worker.finished_signal.connect(self.on_editconf_finished)
         self.worker.start()
 
     def on_editconf_finished(self, success, msg):
+        """Callback al terminar editconf"""
         if success:
             self.lbl_gro_status.setText(f"✅ system.gro generado exitosamente (Caja: {self.box_size_nm} nm)")
             self.lbl_gro_status.setStyleSheet("color: green; font-weight: bold;")
         else:
             self.lbl_gro_status.setText("❌ Error generando system.gro (Ver logs)")
             self.lbl_gro_status.setStyleSheet("color: red; font-weight: bold;")
-            # Solo mostramos popup si falla, porque es crítico
+            # Solo popup si falla crítico
             QMessageBox.warning(self, "Error GROMACS", f"Falló editconf:\n{msg}")
 
-    # --- RESTO DE LÓGICA (Topología) ---
+    # ==========================================================
+    # GESTIÓN DE TABLA Y ARCHIVOS
+    # ==========================================================
 
     def refresh_table(self):
+        """Refresca la tabla de moléculas manteniendo asignaciones previas si existen"""
         self.table_mols.setRowCount(len(self.molecules_data))
+        
+        # Intentar recuperar mapeo guardado (si venimos de una carga de proyecto)
+        # Este atributo se setea en set_state
+        mapping = getattr(self, 'saved_itp_mapping', {})
+        
         for i, mol in enumerate(self.molecules_data):
+            # Col 0: Nombre PDB original
             self.table_mols.setItem(i, 0, QTableWidgetItem(mol['pdb']))
+            
+            # Col 1: Nombre sugerido (3 letras mayúsculas)
+            # Ej: 'solute.pdb' -> 'SOLU'
             guess = os.path.splitext(mol['pdb'])[0][:4].upper()
+            if "agua" in mol['pdb'].lower() or "water" in mol['pdb'].lower():
+                guess = "SOL"
             self.table_mols.setItem(i, 1, QTableWidgetItem(guess))
             
-            btn = QPushButton("Cargar .itp")
+            # Col 2: ITP (Botón)
+            # Verificamos si ya teníamos un ITP asignado para este PDB
+            prev_itp = mapping.get(mol['pdb'])
+            
+            btn = QPushButton()
+            if prev_itp:
+                # Si ya existía, mostramos el nombre en el botón
+                btn.setText(prev_itp)
+                btn.setStyleSheet("text-align: left; padding-left: 5px;")
+            else:
+                btn.setText("Cargar .itp")
+            
+            # Conectar botón pasando la fila específica con lambda
             btn.clicked.connect(lambda ch, r=i: self.select_itp_mol(r))
+            
             self.table_mols.setCellWidget(i, 2, btn)
 
     def select_itp_mol(self, row):
-        f, _ = QFileDialog.getOpenFileName(self, "ITP", "", "*.itp")
+        """Abre diálogo y copia el ITP a la carpeta del sistema"""
+        f, _ = QFileDialog.getOpenFileName(self, "Seleccionar ITP", "", "GROMACS Top (*.itp)")
         if f:
-            self.copy_to_storage(f)
-            self.table_mols.removeCellWidget(row, 2)
-            self.table_mols.setItem(row, 2, QTableWidgetItem(os.path.basename(f)))
+            storage_dir = self.get_storage_path()
+            if storage_dir:
+                try:
+                    # Copiar archivo al sistema activo
+                    shutil.copy(f, os.path.join(storage_dir, os.path.basename(f)))
+                except Exception as e:
+                    print(f"Error copiando ITP: {e}")
+            
+            # Actualizar texto del botón en esa fila
+            btn = self.table_mols.cellWidget(row, 2)
+            if btn:
+                btn.setText(os.path.basename(f))
+                btn.setStyleSheet("text-align: left; padding-left: 5px; font-weight: bold;")
 
     def add_global_include(self):
-        fs, _ = QFileDialog.getOpenFileNames(self, "ITP", "", "*.itp")
-        if fs:
-            for f in fs:
-                self.copy_to_storage(f)
-                self.list_globals.addItem(os.path.basename(f))
+        """Carga un include global (ej atomtypes.itp)"""
+        files, _ = QFileDialog.getOpenFileNames(self, "Seleccionar Includes", "", "ITP Files (*.itp)")
+        storage_dir = self.get_storage_path()
+        
+        if files and storage_dir:
+            for f in files:
+                try:
+                    shutil.copy(f, os.path.join(storage_dir, os.path.basename(f)))
+                    self.list_globals.addItem(os.path.basename(f))
+                except Exception as e:
+                    print(f"Error copiando global: {e}")
 
     def remove_global_include(self):
-        self.list_globals.takeItem(self.list_globals.currentRow())
+        """Borra el include seleccionado de la lista"""
+        row = self.list_globals.currentRow()
+        if row >= 0:
+            self.list_globals.takeItem(row)
 
-    def copy_to_storage(self, f):
-        d = os.path.join(self.current_project_path, "storage")
-        try: shutil.copy(f, os.path.join(d, os.path.basename(f)))
-        except: pass
+    # ==========================================================
+    # LÓGICA DE GENERACIÓN DE TOPOLOGÍA
+    # ==========================================================
 
     def generate_topology(self):
-        storage_dir = os.path.join(self.current_project_path, "storage")
+        storage_dir = self.get_storage_path()
+        if not storage_dir:
+            return
+            
         top_file = os.path.join(storage_dir, "topol.top")
         
+        # 1. Recoger datos de la GUI
         raw_mol_itps = [] 
         final_mols_list = []
-        row_to_itp_map = {}
+        
+        # Mapa: índice de fila -> nombre de archivo ITP original
+        # Esto sirve para luego mapear el nombre real de la molécula
+        row_to_itp_map = {} 
 
         for i in range(self.table_mols.rowCount()):
+            # Nombre de la molécula en GROMACS (Col 1)
             gmx_name = self.table_mols.item(i, 1).text()
-            itp_item = self.table_mols.item(i, 2)
+            
+            # Archivo ITP (Col 2 - Botón)
+            btn = self.table_mols.cellWidget(i, 2)
             itp_filename = None
-            if itp_item and itp_item.text():
-                itp_filename = itp_item.text()
+            if btn and btn.text() != "Cargar .itp":
+                itp_filename = btn.text()
                 raw_mol_itps.append(itp_filename)
                 row_to_itp_map[i] = itp_filename
             
-            final_mols_list.append({'mol_name': gmx_name, 'count': self.molecules_data[i]['count'], 'has_itp': bool(itp_filename)})
+            count = self.molecules_data[i]['count']
+            final_mols_list.append({
+                'mol_name': gmx_name, 
+                'count': count, 
+                'has_itp': bool(itp_filename)
+            })
         
         global_incs = [self.list_globals.item(i).text() for i in range(self.list_globals.count())]
 
-        # Sanitización
+        # 2. PROCESAMIENTO INTELIGENTE (SANITIZACIÓN)
         final_itps_to_include = raw_mol_itps
-        itp_name_mapping = {orig: orig for orig in raw_mol_itps}
+        itp_name_mapping = {orig: orig for orig in raw_mol_itps} # Mapa original -> final
 
         if self.chk_sanitize.isChecked() and raw_mol_itps:
+            # Llamamos al sanitizador
             success, result = self.chem_tools.sanitize_itps(storage_dir, raw_mol_itps)
+            
             if success:
                 clean_itps = result 
+                # Inyectar merged_atomtypes al inicio de globales si se creó
                 if "merged_atomtypes.itp" not in global_incs:
                     global_incs.insert(0, "merged_atomtypes.itp")
                 
+                # Actualizar mapeo para saber qué archivo final corresponde a cada original
                 for idx, original in enumerate(raw_mol_itps):
                     itp_name_mapping[original] = clean_itps[idx]
+                    
                 final_itps_to_include = clean_itps
-                QMessageBox.information(self, "Sanitización", "ITPs corregidos automáticamente.")
+                QMessageBox.information(self, "Sanitización", "Se han corregido los ITPs automáticamente para evitar colisiones.")
             else:
-                QMessageBox.warning(self, "Aviso", f"Sanitización falló: {result}\nUsando originales.")
+                QMessageBox.warning(self, "Error Sanitización", f"Falló el auto-corrector:\n{result}\nSe usarán archivos originales.")
 
-        # Auto-corrección de nombres
+        # 3. AUTO-CORRECCIÓN DE NOMBRES DE MOLÉCULA
+        # Leemos el nombre real dentro del ITP (limpio u original) para evitar errores "No such moleculetype"
+        # Esto soluciona el problema de que el usuario escriba "CO2" pero el ITP diga "CO2N"
         for i, mol_data in enumerate(final_mols_list):
             if mol_data['has_itp']:
-                orig = row_to_itp_map.get(i)
-                final = itp_name_mapping.get(orig)
-                if final:
-                    real = self.chem_tools.get_moleculetype_name_from_itp(os.path.join(storage_dir, final))
-                    if real: mol_data['mol_name'] = real
+                original_itp = row_to_itp_map.get(i)
+                final_itp_name = itp_name_mapping.get(original_itp)
+                
+                if final_itp_name:
+                    full_path = os.path.join(storage_dir, final_itp_name)
+                    # Llamamos al helper que lee [ moleculetype ]
+                    real_name = self.chem_tools.get_moleculetype_name_from_itp(full_path)
+                    
+                    if real_name:
+                        mol_data['mol_name'] = real_name
 
-        # Generar
+        # 4. GENERAR ARCHIVO FINAL
+        # Lista única de includes para no repetir imports
         unique_itps = sorted(list(set(final_itps_to_include)))
+        
         success, msg = self.chem_tools.generate_topology_file(
-            top_file, global_incs, unique_itps, final_mols_list,
-            self.combo_ff.currentText(), self.chk_water.isChecked()
+            top_file,
+            global_includes=global_incs,
+            molecule_itps=unique_itps, 
+            molecules_list=final_mols_list,
+            forcefield=self.combo_ff.currentText(),
+            include_water=self.chk_water.isChecked()
         )
         
-        if success: QMessageBox.information(self, "Éxito", "Topología generada.")
-        else: QMessageBox.critical(self, "Error", msg)
-    
+        if success:
+            QMessageBox.information(self, "Éxito", f"Topología generada correctamente:\n{top_file}")
+        else:
+            QMessageBox.critical(self, "Error", msg)
+
+    # ==========================================================
+    # PERSISTENCIA (GUARDAR Y CARGAR ESTADO)
+    # ==========================================================
+
     def get_state(self):
-        # Guardar mapeo de ITPs de la tabla
+        """Guarda estado para JSON"""
+        # Guardar mapeo de qué ITP se asignó a qué molécula (por nombre de PDB)
         itp_mapping = {}
         for i in range(self.table_mols.rowCount()):
-            pdb_name = self.table_mols.item(i, 0).text()
-            itp_item = self.table_mols.item(i, 2)
-            if itp_item and itp_item.text():
-                itp_mapping[pdb_name] = itp_item.text()
-
-        # Guardar globals
-        globals_list = [self.list_globals.item(i).text() for i in range(self.list_globals.count())]
-
+            # LEER DEL BOTÓN
+            btn = self.table_mols.cellWidget(i, 2)
+            if btn and btn.text() != "Cargar .itp":
+                pdb_name = self.table_mols.item(i, 0).text()
+                itp_mapping[pdb_name] = btn.text()
+                
         return {
             "forcefield": self.combo_ff.currentIndex(),
             "sanitize": self.chk_sanitize.isChecked(),
             "include_water": self.chk_water.isChecked(),
-            "global_includes": globals_list,
+            "global_includes": [self.list_globals.item(i).text() for i in range(self.list_globals.count())],
             "itp_mapping": itp_mapping
         }
 
     def set_state(self, state):
+        """Restaura estado"""
         if not state: return
         
         self.combo_ff.setCurrentIndex(state.get("forcefield", 0))
         self.chk_sanitize.setChecked(state.get("sanitize", True))
         self.chk_water.setChecked(state.get("include_water", False))
         
-        # Restaurar lista globales
+        # Restaurar globales
         self.list_globals.clear()
         for g in state.get("global_includes", []):
             self.list_globals.addItem(g)
             
-        # Nota: La tabla de moléculas se reconstruye sola cuando cambias de pestaña
-        # usando update_project_data, así que solo necesitamos guardar el mapeo de ITPs
-        # para restaurarlo cuando se llene la tabla. (Ver siguiente cambio)
+        # Guardar mapeo en variable temporal para usarlo en refresh_table cuando lleguen los datos
         self.saved_itp_mapping = state.get("itp_mapping", {})
-
-    # MODIFICAR refresh_table PARA USAR EL MAPEO GUARDADO
-    def refresh_table(self):
-        self.table_mols.setRowCount(len(self.molecules_data))
-        # Intentar recuperar mapeo guardado si existe
-        mapping = getattr(self, 'saved_itp_mapping', {})
-        
-        for i, mol in enumerate(self.molecules_data):
-            pdb = mol['pdb']
-            self.table_mols.setItem(i, 0, QTableWidgetItem(pdb))
-            guess = os.path.splitext(pdb)[0][:4].upper()
-            self.table_mols.setItem(i, 1, QTableWidgetItem(guess))
-            
-            # Restaurar ITP si ya lo habíamos asignado antes
-            prev_itp = mapping.get(pdb)
-            if prev_itp:
-                self.table_mols.setItem(i, 2, QTableWidgetItem(prev_itp))
-            else:
-                btn = QPushButton("Cargar .itp")
-                btn.clicked.connect(lambda ch, r=i: self.select_itp_mol(r))
-                self.table_mols.setCellWidget(i, 2, btn)
-    
-    
