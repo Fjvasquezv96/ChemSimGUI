@@ -9,42 +9,119 @@ class ProjectManager:
         self.current_project_path = None
         self.active_system_name = None 
         self.project_data = {}
+        
+        # Gestión de Configuración Global (Recientes)
+        # Se guardará en la carpeta config/ o en la raíz
+        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.config_path = os.path.join(self.root_dir, "config", "global_config.json")
+        self.recent_projects = []
+        
+        self.load_global_config()
+
+    # =========================================================================
+    # GESTIÓN DE CONFIGURACIÓN GLOBAL (RECIENTES)
+    # =========================================================================
+    
+    def load_global_config(self):
+        """Carga la lista de proyectos recientes desde el JSON global"""
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    data = json.load(f)
+                    self.recent_projects = data.get("recent_projects", [])
+            except Exception:
+                self.recent_projects = []
+        else:
+            self.recent_projects = []
+
+    def save_global_config(self):
+        """Guarda la configuración global"""
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        data = {
+            "recent_projects": self.recent_projects
+        }
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"Error guardando config global: {e}")
+
+    def add_to_recent(self, path):
+        """Añade un proyecto a la lista de recientes (Max 5)"""
+        # Normalizar ruta
+        path = os.path.normpath(path)
+        
+        # Eliminar si ya existe para moverlo al principio
+        if path in self.recent_projects:
+            self.recent_projects.remove(path)
+            
+        # Insertar al inicio
+        self.recent_projects.insert(0, path)
+        
+        # Mantener solo los últimos 5
+        if len(self.recent_projects) > 5:
+            self.recent_projects = self.recent_projects[:5]
+            
+        self.save_global_config()
+
+    def get_recent_projects(self):
+        return self.recent_projects
+
+    # =========================================================================
+    # GESTIÓN DEL PROYECTO ACTUAL
+    # =========================================================================
 
     def create_project(self, name, root_path):
         self.current_project_path = os.path.join(root_path, name)
         try:
             os.makedirs(os.path.join(self.current_project_path, "storage"), exist_ok=True)
+            os.makedirs(os.path.join(self.current_project_path, "analysis"), exist_ok=True)
             
             self.project_data = {
                 "name": name,
                 "created_at": str(datetime.now()),
                 "systems": {}, 
-                "active_system": None
+                "active_system": None,
+                "global_states": {} 
             }
             
             self.create_system("Default_System")
+            
             self.save_db()
+            
+            # AGREGAR A RECIENTES
+            self.add_to_recent(self.current_project_path)
+            
             return True, f"Proyecto creado en {self.current_project_path}"
         except Exception as e:
             return False, str(e)
 
     def load_project_from_path(self, full_path):
         db_path = os.path.join(full_path, "project_db.json")
-        if not os.path.exists(db_path): return False, "No es un proyecto válido."
+        if not os.path.exists(db_path):
+            return False, "No es un proyecto válido (falta project_db.json)."
         
         try:
             self.current_project_path = full_path
-            with open(db_path, 'r') as f: self.project_data = json.load(f)
+            with open(db_path, 'r') as f:
+                self.project_data = json.load(f)
             
             active = self.project_data.get("active_system")
             systems = list(self.project_data.get("systems", {}).keys())
             
-            if active and active in systems: self.active_system_name = active
-            elif systems: self.active_system_name = systems[0]
-            else: self.create_system("Default_System")
+            if active and active in systems:
+                self.active_system_name = active
+            elif systems:
+                self.active_system_name = systems[0]
+            else:
+                self.create_system("Default_System")
+            
+            # AGREGAR A RECIENTES
+            self.add_to_recent(self.current_project_path)
                 
             return True, "Proyecto cargado."
-        except Exception as e: return False, f"Error JSON: {e}"
+        except Exception as e:
+            return False, f"Error JSON: {e}"
 
     def save_db(self):
         if self.current_project_path:
@@ -55,7 +132,8 @@ class ProjectManager:
     # --- GESTIÓN DE SISTEMAS ---
 
     def create_system(self, sys_name):
-        if sys_name in self.project_data.get("systems", {}): return False, "Ya existe."
+        if sys_name in self.project_data.get("systems", {}):
+            return False, "Ya existe."
         
         sys_path = os.path.join(self.current_project_path, "storage", sys_name)
         os.makedirs(sys_path, exist_ok=True)
@@ -66,54 +144,40 @@ class ProjectManager:
             "created": str(datetime.now()),
             "setup_state": {},
             "topology_state": {},
-            "simulation_state": {}
+            "simulation_state": {},
+            "analysis_state": {}
         }
+        
         self.active_system_name = sys_name
         self.save_db()
         return True, sys_path
 
     def clone_system(self, new_name, source_name):
-        """
-        Clona configuración (MDP, ITP) pero NO resultados (GRO, TPR, XTC).
-        Resetea el estado de las simulaciones a 'Pendiente'.
-        """
-        if new_name in self.project_data["systems"]: return False, "Nombre existe."
-        if source_name not in self.project_data["systems"]: return False, "Origen no existe."
+        if new_name in self.project_data["systems"]:
+            return False, "Nombre existe."
+        if source_name not in self.project_data["systems"]:
+            return False, "Origen no existe."
 
-        # 1. Clonar datos del JSON
         source_data = self.project_data["systems"][source_name]
         new_data = copy.deepcopy(source_data)
         new_data["created"] = str(datetime.now())
         
-        # 2. LIMPIEZA DE ESTADO (Issue #3)
-        # Reseteamos recursivamente el árbol de simulación a "Pendiente"
-        def reset_status_recursive(nodes):
-            for node in nodes:
-                node['status'] = "Pendiente"
-                if 'children' in node:
-                    reset_status_recursive(node['children'])
-        
+        # Resetear estados de simulación
         sim_state = new_data.get("simulation_state", {})
         if "tree_data" in sim_state:
-            reset_status_recursive(sim_state["tree_data"])
+            self._reset_tree_status(sim_state["tree_data"])
             
         self.project_data["systems"][new_name] = new_data
         
-        # 3. Copiar Archivos Físicos (Filtrado - Issue #4)
         src_path = os.path.join(self.current_project_path, "storage", source_name)
         dst_path = os.path.join(self.current_project_path, "storage", new_name)
         os.makedirs(dst_path, exist_ok=True)
         
-        # Extensiones permitidas (Configuración)
-        # NO copiamos .gro (porque viene de Setup nuevo), ni .tpr, .xtc, .log
-        # SÍ copiamos .mdp (parámetros), .itp (topologías), .top (estructura general), .pdb (referencias)
-        allowed_ext = ['.mdp', '.itp', '.top', '.pdb'] 
+        allowed = ['.mdp', '.itp', '.top', '.pdb'] 
         
         try:
             for item in os.listdir(src_path):
-                if any(item.endswith(ext) for ext in allowed_ext):
-                    # Excepción especial: system_init.pdb a veces se quiere conservar como referencia,
-                    # pero system.gro NO, porque ese es el resultado de editconf.
+                if any(item.endswith(ext) for ext in allowed):
                     s = os.path.join(src_path, item)
                     d = os.path.join(dst_path, item)
                     if os.path.isfile(s):
@@ -123,21 +187,32 @@ class ProjectManager:
 
         self.active_system_name = new_name
         self.save_db()
-        return True, "Sistema clonado (Configuración copiada, Estados reseteados)."
+        return True, "Clonado."
+
+    def _reset_tree_status(self, nodes):
+        for node in nodes:
+            node['status'] = "Pendiente"
+            if 'children' in node:
+                self._reset_tree_status(node['children'])
 
     def delete_system(self, sys_name):
-        if sys_name not in self.project_data.get("systems", {}): return False, "No existe."
+        if sys_name not in self.project_data.get("systems", {}):
+            return False, "No existe."
+            
         sys_path = os.path.join(self.current_project_path, "storage", sys_name)
         try:
-            if os.path.exists(sys_path): shutil.rmtree(sys_path)
-        except Exception as e: return False, str(e)
+            if os.path.exists(sys_path):
+                shutil.rmtree(sys_path)
+        except Exception as e:
+            return False, str(e)
             
         del self.project_data["systems"][sys_name]
         
         if self.active_system_name == sys_name:
             keys = list(self.project_data["systems"].keys())
-            if keys: self.active_system_name = keys[0]
-            else: 
+            if keys:
+                self.active_system_name = keys[0]
+            else:
                 self.active_system_name = None
                 self.create_system("Default_System")
         
@@ -157,6 +232,15 @@ class ProjectManager:
         if self.active_system_name:
             return self.project_data["systems"][self.active_system_name].get(f"{tab}_state", {})
         return {}
+
+    def update_global_state(self, key, data):
+        if "global_states" not in self.project_data:
+            self.project_data["global_states"] = {}
+        self.project_data["global_states"][key] = data
+        self.save_db()
+
+    def get_global_state(self, key):
+        return self.project_data.get("global_states", {}).get(key, {})
     
     def get_system_list(self):
         return list(self.project_data.get("systems", {}).keys())
