@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from src.model.chemistry_tools import ChemistryTools
+from src.model.analysis_parser import AnalysisParser
 from src.controller.workers import CommandWorker
 
 class TopologyTab(QWidget):
@@ -16,6 +17,7 @@ class TopologyTab(QWidget):
         
         # Instancias de lógica
         self.chem_tools = ChemistryTools()
+        self.parser = AnalysisParser()
         
         # Referencias al estado del proyecto
         self.project_mgr = None 
@@ -365,7 +367,36 @@ class TopologyTab(QWidget):
         )
         
         if success:
-            QMessageBox.information(self, "Éxito", f"Topología generada correctamente:\n{top_file}")
+            top_msg = f"Topología generada correctamente:\n{top_file}"
+            
+            # 5. GENERAR ÍNDICE DE GRUPOS AUTOMÁTICAMENTE
+            # Si tenemos al menos 2 componentes, asumimos Soluto = 1ero, Solvente = 2do
+            # Esto facilita que las pestañas posteriores (RDF, Solubilidad) detecten grupos usables
+            # sin obligar al usuario a usar "make_ndx" manual si todo se llama "UNL".
+            
+            # Buscamos system.gro
+            gro_file = os.path.join(storage_dir, "system.gro")
+            ndx_file = os.path.join(storage_dir, "index.ndx")
+            
+            if len(self.molecules_data) >= 2 and os.path.exists(gro_file):
+                # Asumimos orden de tabla: Fila 0 = Soluto, Fila 1 = Solvente
+                try:
+                    n_solute = self.molecules_data[0]['count']
+                    n_solvent = self.molecules_data[1]['count']
+                    name_sol = "System_Solute"
+                    name_slv = "System_Solvent"
+                    
+                    ok_ndx, msg_ndx = self.parser.generate_index_by_counts(
+                        gro_file, ndx_file, 
+                        n_solute, n_solvent,
+                        name_sol, name_slv
+                    )
+                    if ok_ndx:
+                        top_msg += f"\n\n[Auto-Index]: Se creó index.ndx con grupos '{name_sol}' y '{name_slv}'."
+                except Exception as ex:
+                    print(f"No se pudo generar index auto: {ex}")
+
+            QMessageBox.information(self, "Éxito", top_msg)
         else:
             QMessageBox.critical(self, "Error", msg)
 

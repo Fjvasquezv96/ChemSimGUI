@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, 
     QApplication, 
     QScrollArea,
+    QProgressDialog,
     QDoubleSpinBox,
     QColorDialog,
     QFormLayout,
@@ -238,6 +239,326 @@ class AtomSelectionDialog(QDialog):
         self.accept()
 
 
+class FixGroupsDialog(QDialog):
+    """
+    Diálogo para forzar regeneración del index.ndx si está corrupto o desactualizado.
+    Pide N1 y N2 al usuario.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Regenerar Index (Reparar Grupos)")
+        self.setFixedWidth(350)
+        self.n1 = 0
+        self.n2 = 0
+        
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("⚠️ Use esto para reparar grupos Soluto/Solvente\nsi las gráficas RDF caen a 0 incorrectamente."))
+        layout.addWidget(QLabel("Ingrese la cantidad exacta de moléculas:"))
+        
+        form = QFormLayout()
+        self.sb_n1 = QSpinBox()
+        self.sb_n1.setRange(1, 999999)
+        self.sb_n2 = QSpinBox()
+        self.sb_n2.setRange(1, 999999)
+        
+        form.addRow("Moléculas Soluto (N1):", self.sb_n1)
+        form.addRow("Moléculas Solvente (N2):", self.sb_n2)
+        layout.addLayout(form)
+        
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Regenerar index.ndx")
+        btn_ok.clicked.connect(self.accept_data)
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_ok)
+        layout.addLayout(btns)
+        
+        self.setLayout(layout)
+        
+    def accept_data(self):
+        self.n1 = self.sb_n1.value()
+        self.n2 = self.sb_n2.value()
+        self.accept()
+
+# =============================================================================
+# WORKER DEDICADO PARA PROCESAMIENTO POR LOTES (TRAYECTORIAS)
+# =============================================================================
+class BatchTrajectoryWorker(QThread):
+    progress_signal = pyqtSignal(str, int) # Mensaje, Porcentaje
+    finished_signal = pyqtSignal(int, list) # Success count, Lista de errores
+    
+    def __init__(self, tasks):
+        super().__init__()
+        self.tasks = tasks
+        self.is_running = True
+        
+    def stop(self):
+        self.is_running = False
+        
+    def run(self):
+        parser = AnalysisParser()
+        errors = []
+        success_count = 0
+        total = len(self.tasks)
+        
+        for i, t in enumerate(self.tasks):
+            if not self.is_running: break
+            
+            sys_name = t['sys_name']
+            base_name = os.path.basename(t['out_path'])
+            pct = int((i / total) * 100)
+            
+            self.progress_signal.emit(f"Procesando {sys_name}...\n>> {base_name}\n(Esto puede tardar dependiendo del tamaño)", pct)
+            
+            # Asegurar directorio
+            try:
+                os.makedirs(t['travis_dir'], exist_ok=True)
+                
+                # LLAMADA BLOQUEANTE A GROMACS
+                ok, msg = parser.generate_pdb_trajectory(t['xtc'], t['tpr'], t['out_path'], "nojump")
+                
+                if ok:
+                    success_count += 1
+                else:
+                    errors.append(f"{sys_name}: {msg}")
+                    
+            except Exception as e:
+                errors.append(f"{sys_name}: Error inesperado {str(e)}")
+        
+        self.finished_signal.emit(success_count, errors)
+
+
+class TrajectoryManagerDialog(QDialog):
+    def __init__(self, project_mgr, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gestor de Trayectorias GMX/Travis")
+        self.resize(600, 400)
+        self.project_mgr = project_mgr
+        self.storage_path = None
+        if self.project_mgr and self.project_mgr.current_project_path:
+             self.storage_path = os.path.join(self.project_mgr.current_project_path, "storage")
+        
+        self.layout = QVBoxLayout()
+        self.init_ui()
+        self.setLayout(self.layout)
+        self.scan_systems()
+
+    def init_ui(self):
+        lbl = QLabel("Este gestor permite pre-generar los archivos PDB/GRO 'unwrapped' que necesita Travis.\n"
+                     "Esto evita regenerarlos cada vez y permite verificar que están correctos.")
+        lbl.setWordWrap(True)
+        self.layout.addWidget(lbl)
+        
+        # --- FILTROS Y HERRAMIENTAS DE SELECCIÓN ---
+        hbox_filter = QHBoxLayout()
+        
+        self.chk_prod_only = QCheckBox("Mostrar solo 'prod...'")
+        self.chk_prod_only.setToolTip("Si se marca, solo se mostrarán los archivos XTC que comiencen con 'prod'")
+        self.chk_prod_only.setChecked(True)
+        self.chk_prod_only.toggled.connect(self.scan_systems)
+        hbox_filter.addWidget(self.chk_prod_only)
+        
+        hbox_filter.addSpacing(20)
+        
+        btn_all = QPushButton("Seleccionar Todo")
+        btn_all.clicked.connect(self.select_all)
+        hbox_filter.addWidget(btn_all)
+        
+        btn_sys = QPushButton("Seleccionar Sistema Actual")
+        btn_sys.setToolTip("Marca todas las simulaciones que pertenezcan al mismo sistema de la fila seleccionada")
+        btn_sys.clicked.connect(self.select_current_system)
+        hbox_filter.addWidget(btn_sys)
+        
+        hbox_filter.addStretch()
+        self.layout.addLayout(hbox_filter)
+        # -------------------------------------------
+        
+        # Tabla
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Simulación (Sistema)", "XTC Original", "Estado Optimizado (GRO)", "Acción"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.layout.addWidget(self.table)
+        
+        # Botones de Acción Global
+        hbox = QHBoxLayout()
+        btn_scan = QPushButton("🔄 Re-Escanear")
+        btn_scan.clicked.connect(self.scan_systems)
+        hbox.addWidget(btn_scan)
+        
+        btn_process = QPushButton("⚙️ Procesar Seleccionados")
+        btn_process.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")
+        btn_process.clicked.connect(self.process_selected)
+        hbox.addWidget(btn_process)
+        
+        self.layout.addLayout(hbox)
+
+    def select_all(self):
+        """Selecciona todos los items habilitados en la tabla"""
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 3) # Columna checkboxes
+            if item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                item.setCheckState(Qt.CheckState.Checked)
+
+    def select_current_system(self):
+        """Selecciona todos los items del mismo sistema que el seleccionado actualmente"""
+        cur = self.table.currentRow()
+        if cur < 0:
+            QMessageBox.information(self, "Aviso", "Seleccione primero una fila de referencia.")
+            return
+            
+        # Obtenemos el nombre del sistema de la fila actual
+        data = self.table.item(cur, 0).data(Qt.ItemDataRole.UserRole)
+        target_sys = data.get('sys_name')
+        
+        for r in range(self.table.rowCount()):
+            item_data = self.table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+            if item_data.get('sys_name') == target_sys:
+                chk_item = self.table.item(r, 3)
+                if chk_item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                    chk_item.setCheckState(Qt.CheckState.Checked)
+
+    def scan_systems(self):
+        self.table.setRowCount(0)
+        if not self.storage_path or not os.path.exists(self.storage_path):
+            return
+
+        systems = sorted([d for d in os.listdir(self.storage_path) if os.path.isdir(os.path.join(self.storage_path, d))])
+        
+        # Filtro de nombre activado?
+        filter_prod = self.chk_prod_only.isChecked()
+        
+        for sys_name in systems:
+            sys_dir = os.path.join(self.storage_path, sys_name)
+            
+            # Buscar TODOS los archivos XTC en el directorio del sistema
+            if not os.path.exists(sys_dir): continue
+            
+            xtc_files = [f for f in os.listdir(sys_dir) if f.endswith(".xtc")]
+            
+            if not xtc_files:
+                continue
+
+            for f_xtc in xtc_files:
+                base_name = os.path.splitext(f_xtc)[0]
+                
+                # APLICAR FILTRO SI CORRESPONDE
+                if filter_prod and not base_name.startswith("prod"):
+                    continue
+                
+                xtc_path = os.path.join(sys_dir, f_xtc)
+                
+                # Buscamos tpr con el mismo nombre base (ej: prod.xtc -> prod.tpr)
+                # O si no existe, quizas sys_name.tpr como fallback?
+                tpr_path = os.path.join(sys_dir, f"{base_name}.tpr")
+                if not os.path.exists(tpr_path):
+                    # Fallback comun: nombre_del_sistema.tpr
+                    tpr_path = os.path.join(sys_dir, f"{sys_name}.tpr")
+                
+                # Buscar carpeta travis
+                travis_dir = os.path.join(sys_dir, "travis_work")
+                
+                # Nombre de salida esperado
+                # Usamos el nombre del xtc para hacerlo único
+                out_name = f"traj_unwrapped_{base_name}.gro"
+                out_full = os.path.join(travis_dir, out_name)
+                
+                status_opt = "No generado"
+                color_opt = "red"
+                
+                if os.path.exists(out_full):
+                    size_mb = os.path.getsize(out_full) / (1024*1024)
+                    status_opt = f"✅ Listo ({size_mb:.1f} MB)"
+                    color_opt = "green"
+                
+                # Row
+                r = self.table.rowCount()
+                self.table.insertRow(r)
+                
+                # Col 0: Sistema > Simulacion
+                label_sys = f"{sys_name} / {base_name}"
+                item_sys = QTableWidgetItem(label_sys)
+                self.table.setItem(r, 0, item_sys)
+                
+                # Col 1: Estado XTC/TPR
+                status_xtc = "✅ OK" if os.path.exists(xtc_path) and os.path.exists(tpr_path) else "❌ Falta TPR"
+                if not os.path.exists(xtc_path): status_xtc = "❌ Falta XTC"
+                
+                self.table.setItem(r, 1, QTableWidgetItem(status_xtc))
+                
+                # Col 2: Estado output
+                item_stat = QTableWidgetItem(status_opt)
+                item_stat.setForeground(QColor(color_opt))
+                self.table.setItem(r, 2, item_stat)
+                
+                # Col 3: Checkbox
+                chk = QTableWidgetItem()
+                chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                chk.setCheckState(Qt.CheckState.Unchecked)
+                if "OK" in status_xtc:
+                     chk.setText("Generar")
+                else:
+                     chk.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.table.setItem(r, 3, chk)
+                
+                # Data
+                item_sys.setData(Qt.ItemDataRole.UserRole, {
+                    'sys_name': sys_name,
+                    'xtc': xtc_path,
+                    'tpr': tpr_path,
+                    'travis_dir': travis_dir,
+                    'out_path': out_full
+                })
+
+    def process_selected(self):
+        tasks = []
+        for r in range(self.table.rowCount()):
+            if self.table.item(r, 3).checkState() == Qt.CheckState.Checked:
+                data = self.table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+                tasks.append(data)
+        
+        if not tasks:
+            QMessageBox.information(self, "Info", "Seleccione al menos una simulación.")
+            return
+
+        # Configurar diálogo de progreso modal
+        self.progress_dlg = QProgressDialog("Iniciando...", "Cancelar", 0, 100, self)
+        self.progress_dlg.setWindowTitle("Procesando Trayectorias")
+        self.progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dlg.setMinimumDuration(0) # Aparecer inmediatamente
+        self.progress_dlg.setValue(0)
+        
+        # Crear e iniciar Worker
+        self.worker = BatchTrajectoryWorker(tasks)
+        self.worker.progress_signal.connect(self.on_worker_progress)
+        self.worker.finished_signal.connect(self.on_worker_finished)
+        self.progress_dlg.canceled.connect(self.worker.stop)
+        
+        self.worker.start()
+
+    def on_worker_progress(self, msg, pct):
+        if self.progress_dlg:
+            self.progress_dlg.setLabelText(msg)
+            self.progress_dlg.setValue(pct)
+
+    def on_worker_finished(self, success_count, errors):
+        if self.progress_dlg:
+            self.progress_dlg.setValue(100)
+            self.progress_dlg.close()
+            
+        res_msg = f"Proceso finalizado.\nCompletados: {success_count}"
+        if errors:
+            res_msg += "\n\nSe encontraron errores:\n" + "\n".join(errors[:10])
+            if len(errors) > 10: res_msg += "\n... (y más)"
+        
+        QMessageBox.information(self, "Fin del Proceso", res_msg)
+        self.scan_systems()
+        self.worker = None
+
+
 # =============================================================================
 # CLASE PRINCIPAL: PESTAÑA DE ANÁLISIS
 # =============================================================================
@@ -257,6 +578,9 @@ class AnalysisTab(QWidget):
         # Almacén de datos para la graficación avanzada
         # Diccionario { 'id_unico': {'label': str, 'filepath': str, 'x': np.array, 'y': np.array} }
         self.data_store = {} 
+        
+        # COLA DE EJECUCIÓN
+        self.queue_data = [] # Lista de diccionarios de tareas
         
         # Inicializar la interfaz gráfica
         self.init_ui()
@@ -310,6 +634,12 @@ class AnalysisTab(QWidget):
         
         layout.addWidget(self.tabs)
         self.setLayout(layout)
+    
+    # METODO NUEVO
+    def open_traj_manager(self):
+        """Abre el diálogo de gestión de trayectorias"""
+        dlg = TrajectoryManagerDialog(self.project_mgr, self)
+        dlg.exec()
 
     # ------------------------------------------------------
     # UI PARTE A: CÁLCULO TERMODINÁMICA
@@ -365,6 +695,11 @@ class AnalysisTab(QWidget):
         btn_trj = QPushButton("🛠️ Correr trjconv (Centrar)")
         btn_trj.clicked.connect(self.run_trjconv)
         hbox_pbc.addWidget(btn_trj)
+
+        btn_traj_mgr = QPushButton("📂 Gestor Travis (Pre-Process)")
+        btn_traj_mgr.setToolTip("Abrir gestor para generar trayectorias PDB/GRO 'nojump' para Travis")
+        btn_traj_mgr.clicked.connect(self.open_traj_manager)
+        hbox_pbc.addWidget(btn_traj_mgr)
         
         vbox_pbc.addLayout(hbox_pbc)
         group_pbc.setLayout(vbox_pbc)
@@ -433,11 +768,22 @@ class AnalysisTab(QWidget):
         btn_exp = QPushButton("🔍 Explorar Átomos y Crear Grupos")
         btn_exp.clicked.connect(self.open_explorer)
         
+        # FIX: Botón Reparar Grupos
+        btn_fix = QPushButton("🛠️ Reparar/Regenerar Grupos (Index)")
+        btn_fix.clicked.connect(self.open_fix_groups_dialog)
+        btn_fix.setStyleSheet("color: #d9534f; font-weight: bold;")
+        
         self.chk_com = QCheckBox("Usar Centros de Masa")
         self.chk_com.setToolTip("Calcula RDF entre centros de masa moleculares (-selrpos mol_com)")
         
         h_gmx_tools.addWidget(btn_exp)
+        h_gmx_tools.addWidget(btn_fix)
         h_gmx_tools.addWidget(self.chk_com)
+        
+        # Checkbox para ignorar trayectoria limpia (útil si trjconv falló)
+        self.chk_force_raw = QCheckBox("Forzar XTC Original")
+        self.chk_force_raw.setToolTip("Si se marca, usa el archivo .xtc original en lugar de buscar _clean.xtc")
+        h_gmx_tools.addWidget(self.chk_force_raw)
         
         v_gmx.addLayout(h_gmx_sel)
         v_gmx.addLayout(h_gmx_tools)
@@ -447,33 +793,75 @@ class AnalysisTab(QWidget):
         # --- PÁGINA 2: TRAVIS INPUTS ---
         w_travis = QWidget()
         h_travis = QHBoxLayout()
-        self.txt_m1 = QLineEdit()
-        self.txt_m1.setPlaceholderText("Nombre Mol 1 (ej. CBD)")
         
-        self.txt_m2 = QLineEdit()
-        self.txt_m2.setPlaceholderText("Nombre Mol 2 (ej. SOL)")
+        self.cb_travis_m1 = QComboBox()
+        self.cb_travis_m2 = QComboBox()
         
         h_travis.addWidget(QLabel("Molécula 1:"))
-        h_travis.addWidget(self.txt_m1)
+        h_travis.addWidget(self.cb_travis_m1)
         h_travis.addWidget(QLabel("Molécula 2:"))
-        h_travis.addWidget(self.txt_m2)
+        h_travis.addWidget(self.cb_travis_m2)
         
         w_travis.setLayout(h_travis)
         self.stack_rdf.addWidget(w_travis)
         
         vbox_rdf.addWidget(self.stack_rdf)
         
-        # Botón Calcular Principal
-        btn_calc_rdf = QPushButton("📊 Calcular y Añadir a Gráficas")
-        btn_calc_rdf.clicked.connect(self.run_rdf)
-        btn_calc_rdf.setStyleSheet("font-weight: bold; color: green; padding: 8px; font-size: 13px;")
-        vbox_rdf.addWidget(btn_calc_rdf)
+        # Botones de Acción
+        hbox_actions = QHBoxLayout()
+        
+        btn_run_now = QPushButton("▶️ Ejecutar Ahora")
+        btn_run_now.clicked.connect(self.run_rdf)
+        btn_run_now.setStyleSheet("font-weight: bold; color: #28a745; padding: 8px; font-size: 13px;")
+        
+        btn_add_queue = QPushButton("➕ Añadir a Cola")
+        btn_add_queue.clicked.connect(self.add_rdf_to_queue) 
+        btn_add_queue.setStyleSheet("font-weight: bold; color: #0056b3; padding: 8px; font-size: 13px;")
+        
+        hbox_actions.addWidget(btn_run_now)
+        hbox_actions.addWidget(btn_add_queue)
+        
+        vbox_rdf.addLayout(hbox_actions)
         
         group_rdf.setLayout(vbox_rdf)
         layout.addWidget(group_rdf)
         
+        # --- SECCIÓN DE COLA (NUEVO) ---
+        group_queue = QGroupBox("Cola de Procesamiento (Lotes)")
+        group_queue.setCheckable(True)
+        group_queue.setChecked(True)
+        vbox_queue = QVBoxLayout()
+        
+        self.table_queue = QTableWidget()
+        self.table_queue.setColumnCount(4)
+        self.table_queue.setHorizontalHeaderLabels(["Simulación", "Tipo", "Detalle", "Estado"])
+        self.table_queue.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_queue.setMaximumHeight(180)
+        vbox_queue.addWidget(self.table_queue)
+        
+        hbox_q_actions = QHBoxLayout()
+        btn_clear_q = QPushButton("Limpiar Cola")
+        btn_clear_q.clicked.connect(self.clear_queue)
+        
+        btn_run_q = QPushButton("🚀 Ejecutar Cola (Optimizado)")
+        btn_run_q.setToolTip("Agrupa cálculos compatibles para minimizar lecturas de disco.")
+        btn_run_q.clicked.connect(self.run_queue_optimized)
+        btn_run_q.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px;")
+        
+        hbox_q_actions.addWidget(btn_clear_q)
+        hbox_q_actions.addWidget(btn_run_q)
+        vbox_queue.addLayout(hbox_q_actions)
+        
+        group_queue.setLayout(vbox_queue)
+        layout.addWidget(group_queue)
+        
         layout.addStretch()
         self.tab_calc_struct.setLayout(layout)
+
+    def open_traj_manager(self):
+        """Abre el diálogo de gestión de trayectorias"""
+        dlg = TrajectoryManagerDialog(self.project_mgr, self)
+        dlg.exec()
 
     # ------------------------------------------------------
     # UI PARTE C: VISUALIZACIÓN AVANZADA (MULTIPANEL)
@@ -639,6 +1027,8 @@ class AnalysisTab(QWidget):
         """Callback al cambiar simulación en el combo"""
         if self.rb_gmx.isChecked():
             self.load_gmx_groups()
+        elif self.rb_travis.isChecked():
+            self.load_travis_molecules()
 
     def update_rdf_ui(self):
         """Cambia la interfaz según el motor seleccionado"""
@@ -647,6 +1037,39 @@ class AnalysisTab(QWidget):
             self.load_gmx_groups()
         else:
             self.stack_rdf.setCurrentIndex(1)
+            self.load_travis_molecules()
+
+    def load_travis_molecules(self):
+        """Carga las moléculas detectadas en el .gro para Travis"""
+        sim = self.combo_sims.currentText()
+        d = self.get_storage_path()
+        if not sim or not d: return
+        
+        self.cb_travis_m1.clear()
+        self.cb_travis_m2.clear()
+
+        # Intentar leer desde el gro de la simulación o system.gro
+        gro_file = os.path.join(d, f"{sim}.gro")
+        if not os.path.exists(gro_file):
+            gro_file = os.path.join(d, "system.gro")
+            
+        mols = self.parser.get_structure_molecules(gro_file)
+        
+        if not mols:
+            self.cb_travis_m1.addItem("No detectadas", 1)
+            self.cb_travis_m2.addItem("No detectadas", 2)
+            return
+
+        for i, m in enumerate(mols):
+            # Travis ID = index + 1
+            txt = f"{m} (ID: {i+1})"
+            self.cb_travis_m1.addItem(txt, i+1)
+            self.cb_travis_m2.addItem(txt, i+1)
+            
+        # Selección por defecto inteligente
+        if len(mols) > 0: self.cb_travis_m1.setCurrentIndex(0)
+        if len(mols) > 1: self.cb_travis_m2.setCurrentIndex(1)
+        else: self.cb_travis_m2.setCurrentIndex(0)
 
     def load_gmx_groups(self):
         """Carga los grupos del index.ndx en los combos (Para RDF y PBC)"""
@@ -681,11 +1104,19 @@ class AnalysisTab(QWidget):
 
     def set_busy(self, busy):
         """Bloquea la interfaz mientras procesa"""
-        self.setEnabled(not busy)
+        # NO deshabilitar todo el widget porque congela la UI visualmente
+        # Solo deshabilitar inputs críticos y poner cursor de espera
+        self.btn_run_q = self.findChild(QPushButton, "btn_run_q") # Buscar dinamicamente si no esta en scope
+        
         if busy:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            if hasattr(self, 'group_queue'): self.group_queue.setEnabled(False) # Si existe
+            # Si no encontramos el group_queue, deshabilitar la tabla
+            self.table_queue.setEnabled(False)
         else:
             QApplication.restoreOverrideCursor()
+            if hasattr(self, 'group_queue'): self.group_queue.setEnabled(True)
+            self.table_queue.setEnabled(True)
 
     # ==========================================================
     # EJECUCIÓN DE CÁLCULOS
@@ -734,6 +1165,21 @@ class AnalysisTab(QWidget):
         if center_id is None or out_id is None:
             QMessageBox.warning(self, "Aviso", "Grupos no cargados. Seleccione una simulación válida.")
             return
+
+        # Advertencia si el output no es todo el sistema
+        # Suponemos que si el nombre no contiene "System", puede ser peligroso para RDF posterior
+        out_text = self.cb_pbc_out.currentText()
+        if "System" not in out_text and out_id != 0:
+            resp = QMessageBox.question(
+                self, "Advertencia de Compatibilidad",
+                f"Ha seleccionado '{out_text}' como grupo de salida.\n"
+                "Esto generará una trayectoria reducida (menos átomos).\n"
+                "Si luego ejecuta RDF usando el TPR original (sistema completo), GROMACS fallará por 'Atom mismatch'.\n\n"
+                "¿Desea continuar de todas formas?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if resp == QMessageBox.StandardButton.No:
+                return
         
         self.set_busy(True)
         self.worker = AnalysisWorker(
@@ -753,42 +1199,92 @@ class AnalysisTab(QWidget):
             
         tpr = os.path.join(d, f"{sim}.tpr")
         
-        # Preferir trayectoria limpia
+        # Preferir trayectoria limpia salvo que se force la original
         xtc = os.path.join(d, f"{sim}_clean.xtc")
-        if not os.path.exists(xtc):
+        if self.chk_force_raw.isChecked() or not os.path.exists(xtc):
             xtc = os.path.join(d, f"{sim}.xtc")
-        
+            
+        # Verificar integridad mínima
+        if os.path.exists(xtc) and os.path.getsize(xtc) == 0:
+            QMessageBox.warning(self, "Error", f"El archivo de trayectoria {os.path.basename(xtc)} está vacío.")
+            return
+
         self.set_busy(True)
         
         if self.rb_gmx.isChecked():
             # GROMACS
             out = os.path.join(d, f"{sim}_rdf_gmx.xvg")
-            ref = self.cb_ref.currentData()
-            sel = self.cb_sel.currentData()
+            ref_idx = self.cb_ref.currentData()
             
-            if ref is None: 
+            if ref_idx is None: 
                 self.set_busy(False)
                 return
+
+            # Obtener nombres reales de los grupos (eliminando el ID visual)
+            # Formato en combo: "Nombre (ID)"
+            ref_name = self.cb_ref.currentText().rsplit(' (', 1)[0]
+            sel_name = self.cb_sel.currentText().rsplit(' (', 1)[0]
+            
+            # --- VALIDACIÓN DE CUTOFF vs BOX SIZE ---
+            rmax = self.sb_rmax.value()
+            
+            # Intentar leer dimensiones de la simulación actual (ej: prod.gro), sino system.gro
+            gro_file = os.path.join(d, f"{sim}.gro")
+            if not os.path.exists(gro_file):
+                gro_file = os.path.join(d, "system.gro")
+                
+            min_box = self.parser.get_box_dimensions(gro_file)
+            
+            if min_box:
+                limit = min_box / 2.0
+                if rmax > limit:
+                    msg = f"El cut-off solicitado ({rmax} nm) es mayor que la mitad de la caja ({limit:.2f} nm).\n\n" \
+                          "Esto causará datos anómalos (ceros) a distancias largas debido a PBC (Minimum Image Convention).\n" \
+                          f"Se recomienda usar un valor menor a {limit:.2f} nm.\n\n" \
+                          "¿Desea continuar de todos modos?"
+                    resp = QMessageBox.warning(self, "Advertencia de PBC", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if resp == QMessageBox.StandardButton.No:
+                        self.set_busy(False)
+                        return
+            # ----------------------------------------
             
             # Pasar parámetros extendidos (Bin, Cutoff)
+            # Usamos ref_name y sel_name en lugar de índices para mayor seguridad con make_ndx
             self.worker = AnalysisWorker(
-                self.parser.run_gmx_rdf, tpr, xtc, out, ref, sel, d, 
-                self.chk_com.isChecked(), self.sb_bin.value(), self.sb_rmax.value()
+                self.parser.run_gmx_rdf, tpr, xtc, out, ref_name, sel_name, d, 
+                self.chk_com.isChecked(), self.sb_bin.value(), rmax
             )
             
-            label_base = f"RDF {self.cb_ref.currentText().split('(')[0]}-{self.cb_sel.currentText().split('(')[0]}"
+            label_base = f"RDF {ref_name}-{sel_name}"
             
         else:
-            # TRAVIS
-            out = os.path.join(d, f"{sim}_rdf_travis.csv")
-            st = os.path.join(d, "system.gro")
+            # TRAVIS (Experimental)
+            gro_file = os.path.join(d, f"{sim}.gro")
+            if not os.path.exists(gro_file):
+                gro_file = os.path.join(d, "system.gro")
+            
+            # Obtener IDs directamente de los ComboBoxes (Data tiene el ID Int)
+            ref_id = self.cb_travis_m1.currentData()
+            sel_id = self.cb_travis_m2.currentData()
+            
+            if ref_id is None: ref_id = 1
+            if sel_id is None: sel_id = 2
+            
+            # Nombres para la etiqueta (sin el ID)
+            ref_name = self.cb_travis_m1.currentText().split(" (ID:")[0]
+            sel_name = self.cb_travis_m2.currentText().split(" (ID:")[0]
+
+            out = os.path.join(d, "travis_results.csv") 
+            # FIX: Pasar también el TPR file (necesario para el unwrap en run_travis_rdf actualizado)
+            tpr_file = os.path.join(d, f"{sim}.tpr")
             
             self.worker = AnalysisWorker(
-                self.parser.run_travis_rdf, st, xtc, out, 
-                self.tx_m1.text(), self.tx_m2.text()
+                self.parser.run_travis_rdf, gro_file, xtc, tpr_file,
+                ref_id, sel_id, ref_name, sel_name, 
+                self.sb_rmax.value(), self.sb_bin.value()
             )
-            label_base = f"RDF {self.tx_m1.text()}-{self.tx_m2.text()}"
-        
+            label_base = f"Travis RDF ({ref_name}-{sel_name})"
+
         full_label = f"{label_base} ({sim})"
         self.worker.finished_signal.connect(lambda s, m: self.finish_calc(s, m, out, full_label))
         self.worker.start()
@@ -802,13 +1298,27 @@ class AnalysisTab(QWidget):
             QMessageBox.critical(self, "Error", msg)
             return
         
+        # FIX: Travis genera archivos con nombres autogenerados (ej: rdf_mol1_mol2.csv)
+        # Si ejecutamos Travis, debemos buscar el CSV más nuevo en la carpeta
+        final_file = out_file
+        if "Travis" in label:
+            d = os.path.dirname(out_file)
+            try:
+                # Buscar CSVs que empiecen con rdf_ y ordenar por fecha
+                csvs = [os.path.join(d, f) for f in os.listdir(d) 
+                        if f.startswith("rdf_") and f.endswith(".csv")]
+                if csvs:
+                    final_file = max(csvs, key=os.path.getmtime)
+            except:
+                pass
+
         # Leer datos y añadir a Store (guardando el filepath para persistencia)
-        lbl, x, y_list = self.parser.get_data_from_file(out_file)
+        lbl, x, y_list = self.parser.get_data_from_file(final_file)
         
         if y_list:
-            self.add_data_to_store(label, x, y_list[0], out_file)
+            self.add_data_to_store(label, x, y_list[0], final_file)
         else:
-            QMessageBox.warning(self, "Aviso", "El archivo de salida está vacío o tiene formato incorrecto.")
+            QMessageBox.warning(self, "Aviso", f"El archivo de salida ({os.path.basename(final_file)}) está vacío o tiene formato incorrecto.")
 
     def open_explorer(self):
         """Abre el diálogo de exploración de átomos"""
@@ -838,6 +1348,82 @@ class AnalysisTab(QWidget):
                 lambda s, m: (self.set_busy(False), self.load_gmx_groups() if s else QMessageBox.critical(self, "Error", m))
             )
             self.worker.start()
+
+    def open_fix_groups_dialog(self):
+        """Abre dialogo para regenerar index.ndx usando generate_index_by_counts"""
+        sim = self.combo_sims.currentText()
+        d = self.get_storage_path()
+        if not sim or not d: return
+        
+        # Verificar si existe system.gro (necesario para contar átomos)
+        gro_file = os.path.join(d, "system.gro")
+        if not os.path.exists(gro_file):
+            QMessageBox.warning(self, "Error", "Falta 'system.gro' en la carpeta.")
+            return
+            
+        dlg = FixGroupsDialog(self)
+        
+        # Intentar Auto-Detección desde topol.top
+        top_file = os.path.join(d, "topol.top")
+        if os.path.exists(top_file):
+            try:
+                # Parseo rudimentario de [ molecules ]
+                # Formato: Compound    #mols
+                mols_found = []
+                in_mols = False
+                with open(top_file, 'r') as f:
+                    for line in f:
+                        clean = line.split(';')[0].strip()
+                        if not clean: continue
+                        if clean.startswith('[') and 'molecules' in clean:
+                            in_mols = True
+                            continue
+                        if in_mols and not clean.startswith('['):
+                            parts = clean.split()
+                            if len(parts) >= 2 and parts[1].isdigit():
+                                mols_found.append(int(parts[1]))
+                
+                if len(mols_found) >= 2:
+                    dlg.sb_n1.setValue(mols_found[0]) # N1 (Soluto)
+                    dlg.sb_n2.setValue(mols_found[1]) # N2 (Solvente)
+                    dlg.setWindowTitle("Regenerar Index (Auto-Detectado)")
+            except:
+                pass # Fallback a 0/0
+        
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            n1 = dlg.n1
+            n2 = dlg.n2
+            
+            self.set_busy(True)
+            ndx_file = os.path.join(d, "index.ndx")
+            
+            # Usamos un worker para no congelar, aunque es rápido
+            # La función devuelve (success, msg)
+            def fix_task():
+                return self.parser.generate_index_by_counts(
+                    gro_file, ndx_file, n1, n2,
+                    name_solute="System_Solute_Fixed", 
+                    name_solvent="System_Solvent_Fixed"
+                )
+
+            self.worker = AnalysisWorker(fix_task)
+            self.worker.finished_signal.connect(self._on_fix_finished)
+            self.worker.start()
+            
+    def _on_fix_finished(self, success, msg):
+        self.set_busy(False)
+        if success:
+            QMessageBox.information(self, "Éxito", "Grupos regenerados correctamente.\nSeleccione 'System_Solute_Fixed' y 'System_Solvent_Fixed'.")
+            self.load_gmx_groups()
+            
+            # Auto-seleccionar si existen
+            idx1 = self.cb_ref.findText("System_Solute_Fixed", Qt.MatchFlag.MatchContains)
+            if idx1 >= 0: self.cb_ref.setCurrentIndex(idx1)
+            
+            idx2 = self.cb_sel.findText("System_Solvent_Fixed", Qt.MatchFlag.MatchContains)
+            if idx2 >= 0: self.cb_sel.setCurrentIndex(idx2)
+        else:
+            QMessageBox.critical(self, "Error", msg)
 
     # ==========================================================
     # LÓGICA DE GRAFICACIÓN AVANZADA
@@ -993,7 +1579,7 @@ class AnalysisTab(QWidget):
         self.data_store = {}
         self.table_map.setRowCount(0)
         self.figure.clear()
-        
+
         # 2. Restaurar Layout
         self.combo_layout.setCurrentIndex(state.get("layout_mode", 0))
         
@@ -1025,3 +1611,299 @@ class AnalysisTab(QWidget):
         
         # Actualizar gráfica final
         self.update_plot_layout()
+
+    # ==========================================================
+    # LOGICA DE COLA (OPTIMIZADA)
+    # ==========================================================
+
+    def add_rdf_to_queue(self):
+        """Valida y añade una tarea de RDF a la cola"""
+        sim = self.combo_sims.currentText()
+        d = self.get_storage_path()
+        
+        if not sim or not self.combo_sims.isEnabled():
+            QMessageBox.warning(self, "Aviso", "Seleccione una simulación válida.")
+            return
+
+        ref_id = self.cb_ref.currentData()
+        sel_id = self.cb_sel.currentData()
+        
+        if ref_id is None or sel_id is None:
+            QMessageBox.warning(self, "Aviso", "Seleccione Grupos Validos.")
+            return
+            
+        ref_name = self.cb_ref.currentText().split('(')[0].strip()
+        sel_name = self.cb_sel.currentText().split('(')[0].strip()
+
+        # Determinar tipo
+        task_type = 'rdf_gmx' if self.rb_gmx.isChecked() else 'rdf_travis'
+
+        # Crear objeto tarea
+        task = {
+            'type': task_type,
+            'sim': sim,
+            'path': d,
+            'status': 'pending',
+            # Parámetros Clave para Agrupación
+            'ref_id': ref_id,  
+            'ref_name': ref_name,
+            # Parámetro Variable
+            'sel_id': sel_id,
+            'sel_name': sel_name,
+            # Configuración
+            'com': self.chk_com.isChecked(),
+            'bin': self.sb_bin.value(),
+            'rmax': self.sb_rmax.value()
+        }
+        
+        self.queue_data.append(task)
+        self._update_queue_table()
+
+    def clear_queue(self):
+        self.queue_data = []
+        self._update_queue_table()
+
+    def _update_queue_table(self):
+        self.table_queue.setRowCount(0)
+        for t in self.queue_data:
+            row = self.table_queue.rowCount()
+            self.table_queue.insertRow(row)
+            self.table_queue.setItem(row, 0, QTableWidgetItem(t['sim']))
+            self.table_queue.setItem(row, 1, QTableWidgetItem(t['type']))
+            
+            det = f"{t['ref_name']} - {t['sel_name']}"
+            self.table_queue.setItem(row, 2, QTableWidgetItem(det))
+            
+            st = t['status']
+            item_st = QTableWidgetItem(st)
+            if st == 'done': item_st.setForeground(QColor('green'))
+            elif 'error' in st: item_st.setForeground(QColor('red'))
+            self.table_queue.setItem(row, 3, item_st)
+
+    def run_queue_optimized(self):
+        """
+        Ejecuta la cola agrupando tareas compatibles.
+        Estrategia: Agrupar por (Simulación, Ref_ID, Parametros).
+        Las selecciones variables se juntan en una sola llamada.
+        """
+        if not self.queue_data: return
+        
+        # 1. Agrupar tareas
+        grouped_jobs = {} # Key: (type, sim, ref_id, params...) -> List of tasks indices
+        
+        pending_count = 0
+        for i, task in enumerate(self.queue_data):
+            if task['status'] == 'done': continue
+            pending_count += 1
+            
+            # Parametros base
+            t_sim = task['sim']
+            t_ref = task['ref_id']
+            t_rmax = task['rmax']
+            t_bin = task['bin']
+            
+            if task['type'] == 'rdf_gmx':
+                # GMX depende de Use COM
+                key = ('rdf_gmx', t_sim, t_ref, t_rmax, t_bin, task['com'])
+            elif task['type'] == 'rdf_travis':
+                # Travis no usa COM en interfaz simple (por ahora)
+                key = ('rdf_travis', t_sim, t_ref, t_rmax, t_bin, None)
+            else:
+                key = ('unknown', t_sim, t_ref, i) # Fallback
+            
+            if key not in grouped_jobs:
+                grouped_jobs[key] = []
+            
+            grouped_jobs[key].append(i) 
+            
+        if pending_count == 0:
+            QMessageBox.information(self, "Info", "No hay tareas pendientes.")
+            return
+
+        self.set_busy(True)
+        self.current_batch_jobs = list(grouped_jobs.items())
+        self.current_job_index = 0
+        
+        self.lbl_thermo_status.setText(f"Iniciando lotes optimizados: {len(self.current_batch_jobs)} bloques...")
+        self._process_next_batch_job()
+
+    def _process_next_batch_job(self):
+        """Procesa el siguiente grupo de tareas optimizado"""
+        if self.current_job_index >= len(self.current_batch_jobs):
+            self.set_busy(False)
+            self._update_queue_table()
+            QMessageBox.information(self, "Cola Finalizada", "Todos los análisis terminaron. Revise la pestaña Visualización Avanzada.")
+            self.tabs.setCurrentIndex(2) # Switch to Viz Tab
+            return
+            
+        key, task_indices = self.current_batch_jobs[self.current_job_index]
+        job_type = key[0]
+        
+        if job_type == 'rdf_gmx':
+            self._process_gmx_batch(key, task_indices)
+        elif job_type == 'rdf_travis':
+            self._process_travis_batch(key, task_indices)
+        else:
+            print("Unknown job type")
+            self.current_job_index += 1
+            self._process_next_batch_job()
+
+    def _process_gmx_batch(self, key, task_indices):
+        _, sim_name, ref_id, rmax, bin_w, use_com = key
+        
+        # Recuperar nombres 
+        first_task = self.queue_data[task_indices[0]]
+        ref_name = first_task['ref_name']
+        d = first_task['path']
+
+        # Obtener lista de NOMBRES de selección para este grupo
+        sel_names = [self.queue_data[idx]['sel_name'] for idx in task_indices]
+            
+        # Preparar archivos
+        tpr = os.path.join(d, f"{sim_name}.tpr")
+        xtc = os.path.join(d, f"{sim_name}_clean.xtc")
+        if not os.path.exists(xtc): xtc = os.path.join(d, f"{sim_name}.xtc")
+        
+        # Nombre de salida único para el batch
+        import time
+        ts = int(time.time())
+        out_file = os.path.join(d, f"{sim_name}_rdf_gmx_batch_{self.current_job_index}_{ts}.xvg")
+        
+        self.lbl_thermo_status.setText(f"Batch GMX {self.current_job_index + 1}: {ref_name} vs {len(sel_names)} grupos...")
+        
+        self.worker = AnalysisWorker(
+            self.parser.run_gmx_rdf_multi, 
+            tpr, xtc, out_file, ref_name, sel_names, d, 
+            use_com, bin_w, rmax
+        )
+        
+        self.worker.finished_signal.connect(
+            lambda s, m: self._on_gmx_batch_finished(s, m, out_file, task_indices)
+        )
+        self.worker.start()
+
+    def _process_travis_batch(self, key, task_indices):
+        _, sim_name, ref_id, rmax, bin_w, _ = key
+        
+        first_task = self.queue_data[task_indices[0]]
+        ref_name = first_task['ref_name']
+        d = first_task['path']
+        
+        # Preparar lista de tareas para el parser
+        travis_tasks = []
+        for idx in task_indices:
+            t = self.queue_data[idx]
+            travis_tasks.append({
+                'obs_id': t['sel_id'], # ID Numerico
+                'obs_name': t['sel_name'],
+                'rmax': rmax,
+                'bins': bin_w
+            })
+            
+        tpr = os.path.join(d, f"{sim_name}.tpr")
+        xtc = os.path.join(d, f"{sim_name}_clean.xtc")
+        if not os.path.exists(xtc): xtc = os.path.join(d, f"{sim_name}.xtc")
+        
+        self.lbl_thermo_status.setText(f"Batch TRAVIS {self.current_job_index + 1}: {ref_name} vs {len(travis_tasks)} grupos...")
+        
+        # Travis corre en terminal externo y bloquea (pero necesitamos que no bloquee la GUI)
+        # Como AnalysisWorker corre en thread, está bien.
+        
+        self.worker = AnalysisWorker(
+            self.parser.run_travis_batch,
+            d, xtc, tpr, ref_id, ref_name, travis_tasks
+        )
+        
+        self.worker.finished_signal.connect(
+            lambda s, m: self._on_travis_batch_finished(s, m, task_indices)
+        )
+        self.worker.start()
+
+    def _on_gmx_batch_finished(self, success, msg, out_file, task_indices):
+        """Maneja el resultado de GMX"""
+        if success:
+            lbls, x, ys = self.parser.get_data_from_file(out_file)
+            
+            if len(ys) == len(task_indices):
+                for i, idx in enumerate(task_indices):
+                    task = self.queue_data[idx]
+                    y_data = ys[i]
+                    label = f"RDF(GMX): {task['ref_name']} - {task['sel_name']} [{task['sim']}]"
+                    self.add_data_to_store(label, x, y_data, out_file)
+                    self.queue_data[idx]['status'] = 'done'
+            else:
+                 # Mismatch logic simplificada
+                 print(f"Mismatch GMX: {len(ys)} vs {len(task_indices)}")
+                 for idx in task_indices: self.queue_data[idx]['status'] = 'error (cols)'
+        else:
+            for idx in task_indices: self.queue_data[idx]['status'] = 'error'
+            print(msg)
+        
+        self.current_job_index += 1
+        self._process_next_batch_job()
+
+    def _on_travis_batch_finished(self, success, msg, task_indices):
+        """Maneja el resultado de Travis (MSG contiene paths nuevos)"""
+        if success:
+            # El mensaje trae "Se generaron X archivos...\nPath1\nPath2..."
+            # Pero run_travis_batch no nos devuelve el mapeo exacto 1 a 1 ordenado de forma garantizada 
+            # si los nombres de archivo dependen de lo que detectó travis.
+            
+            # Sin embargo, AnalysisParser movió los archivos a RDF_System_Ref-Sel.csv
+            # Intentemos buscar archivos recientes que coincidan con lo esperado.
+            
+            # Marcar todo como hecho por ahora
+            # Lo ideal sería leer los CSV resultantes.
+            
+            # AnalysisParser.run_travis_batch devuelve success y un log.
+            # No devuelve los datos X, Y. Hay que leerlos de disco.
+            
+            # Intento de carga automática:
+            # Buscamos en 'msg' las rutas? El msg es string.
+            # Mejor escaneamos carpeta 'd' buscando RDF_{sim}... que coincidan con ref/sel
+            
+            first_task = self.queue_data[task_indices[0]]
+            d = first_task['path']
+            
+            # Vamos uno por uno intentando cargar su resultado esperado
+            # AnalysisParser generó: f"RDF_{sys_id}_{safe_ref}-{safe_sel}.csv"
+            
+            # Reconstruyamos sys_id (aproximado, o buscamos wildcard)
+            # sys_id depende del path. Es dificil reconstruirlo exacto aquí sin duplica logica.
+            # Pero podemos buscar por "RDF_*_{ref}-{sel}.csv"
+            
+            import glob
+            
+            for idx in task_indices:
+                task = self.queue_data[idx]
+                s_ref = task['ref_name'].replace(" ", "_").replace("(", "").replace(")", "")
+                s_sel = task['sel_name'].replace(" ", "_").replace("(", "").replace(")", "")
+                
+                # Pattern
+                pattern = os.path.join(d, f"RDF_*_{s_ref}-{s_sel}.csv")
+                matches = glob.glob(pattern)
+                
+                if matches:
+                    # Cargar el más nuevo
+                    latest = max(matches, key=os.path.getmtime)
+                    label = f"RDF(Travis): {task['ref_name']} - {task['sel_name']} [{task['sim']}]"
+                    
+                    try:
+                        l, x, ys = self.parser.get_data_from_file(latest)
+                        if ys:
+                            self.add_data_to_store(label, x, ys[0], latest)
+                            self.queue_data[idx]['status'] = 'done'
+                        else:
+                            self.queue_data[idx]['status'] = 'empty'
+                    except:
+                         self.queue_data[idx]['status'] = 'error read'
+                else:
+                    self.queue_data[idx]['status'] = 'not found'
+
+        else:
+            for idx in task_indices:
+                self.queue_data[idx]['status'] = 'error'
+        
+        self.current_job_index += 1
+        self._process_next_batch_job()
+

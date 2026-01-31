@@ -193,6 +193,7 @@ class MainWindow(QMainWindow):
         
         # Cargar estado global
         self.comp_tab.set_state(self.project_mgr.get_global_state("comparative"))
+        self.sol_tab.set_state(self.project_mgr.get_global_state("solubility"))
 
     def refresh_systems_combo(self):
         self.combo_systems.blockSignals(True)
@@ -278,10 +279,11 @@ class MainWindow(QMainWindow):
         self.project_mgr.update_tab_state("simulation", self.sim_tab.get_state())
         self.project_mgr.update_tab_state("analysis", self.analysis_tab.get_state())
         self.project_mgr.update_global_state("comparative", self.comp_tab.get_state())
+        self.project_mgr.update_global_state("solubility", self.sol_tab.get_state())
         self.project_mgr.save_db()
 
     def enable_tabs(self, enable):
-        for i in range(1, 6): self.tabs.setTabEnabled(i, enable)
+        for i in range(1, 7): self.tabs.setTabEnabled(i, enable)
     
     def closeEvent(self, event):
         self.save_all_states()

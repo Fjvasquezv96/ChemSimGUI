@@ -126,8 +126,25 @@ class ProjectManager:
     def save_db(self):
         if self.current_project_path:
             self.project_data["active_system"] = self.active_system_name
-            with open(os.path.join(self.current_project_path, "project_db.json"), 'w') as f:
-                json.dump(self.project_data, f, indent=4)
+            
+            # Guardado atómico para evitar corrupción
+            db_path = os.path.join(self.current_project_path, "project_db.json")
+            tmp_path = db_path + ".tmp"
+            
+            try:
+                with open(tmp_path, 'w') as f:
+                    json.dump(self.project_data, f, indent=4)
+                    
+                # Si se escribió bien, reemplazamos el original
+                # En Windows rename no es atómico si existe, pero aquí estamos en Linux
+                if os.path.exists(db_path):
+                    os.replace(tmp_path, db_path)
+                else:
+                    os.rename(tmp_path, db_path)
+            except Exception as e:
+                print(f"Error guardando DB: {e}")
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     # --- GESTIÓN DE SISTEMAS ---
 
